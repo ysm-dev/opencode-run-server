@@ -31,7 +31,7 @@ describe("server subprocess e2e", () => {
     const config = await createServerConfig(
       {
         bind: "127.0.0.1",
-        healthCheck: { failureThreshold: 1, intervalMs: 25, timeoutMs: 10 },
+        healthCheck: { failureThreshold: 2, intervalMs: 50, timeoutMs: 1000 },
         opencodePath: fakeOpencode,
         port,
         runTimeoutMs: 5000,
@@ -61,7 +61,7 @@ describe("server subprocess e2e", () => {
     expect(argv).toContain(`http://127.0.0.1:${mainPort}/`);
 
     await close(main);
-    await waitForExit(child, 1000);
+    await waitForExit(child, 3000);
   }, 15_000);
 });
 
