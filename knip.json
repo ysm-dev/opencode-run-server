@@ -1,0 +1,6 @@
+{
+  "$schema": "https://unpkg.com/knip@5/schema.json",
+  "entry": ["src/plugin.ts", "src/server.ts"],
+  "project": ["src/**/*.ts", "test/**/*.ts"],
+  "ignoreDependencies": ["@opencode-ai/plugin"]
+}

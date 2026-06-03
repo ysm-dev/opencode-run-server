@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun i --frozen-lockfile
+      - run: bun run check
+      - name: Ban as-any / as-unknown
+        run: |
+          if grep -rnE 'as[[:space:]]+(any|unknown)\b' src; then
+            echo "found forbidden assertion"; exit 1
+          fi
+      - run: bun run typecheck
+      - run: bun run knip
+      - run: bun run test
+      - run: bun run build
