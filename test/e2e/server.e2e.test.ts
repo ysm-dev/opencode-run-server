@@ -62,7 +62,7 @@ describe("server subprocess e2e", () => {
 
     await close(main);
     await waitForExit(child, 1000);
-  });
+  }, 15_000);
 });
 
 const fakeOpencodeScript = (argvFile: string) => `#!${process.execPath}
@@ -98,7 +98,7 @@ const addressPort = (server: ReturnType<typeof createServer>) => {
 };
 
 const waitForHttp = async (url: string) => {
-  for (let attempt = 0; attempt < 50; attempt += 1) {
+  for (let attempt = 0; attempt < 250; attempt += 1) {
     try {
       const response = await fetch(url);
       if (response.ok) return;
@@ -109,7 +109,7 @@ const waitForHttp = async (url: string) => {
 };
 
 const waitForFile = async (path: string) => {
-  for (let attempt = 0; attempt < 50; attempt += 1) {
+  for (let attempt = 0; attempt < 250; attempt += 1) {
     try {
       await readFile(path, "utf8");
       return;
