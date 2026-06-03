@@ -1,6 +1,6 @@
 {
   "name": "opencode-run-server",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "opencode plugin that supervises a Hono HTTP subprocess exposing POST /run to trigger non-interactive `opencode run --attach` invocations against the same opencode server.",
   "type": "module",
   "main": "./dist/plugin.js",
