@@ -167,7 +167,7 @@ export const createServerConfig = async (
     dangerouslySkipPermissions: options.dangerouslySkipPermissions ?? false,
     healthCheck: createHealthCheckConfig(options.healthCheck),
     log: createLogConfig(options.log, stateDir),
-    maxBodyBytes: options.maxBodyBytes ?? 1_048_576,
+    maxBodyBytes: options.maxBodyBytes ?? 10_485_760,
     opencodePath: options.opencodePath ?? deps.execPath ?? process.execPath,
     port: options.port ?? 4097,
     queueMax: options.queueMax ?? 100,

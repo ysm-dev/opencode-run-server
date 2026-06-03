@@ -2,11 +2,15 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
+import {
+  type MaterializeInlineFiles,
+  materializeInlineFiles,
+} from "./attachments.js";
 import type { ServerConfig } from "./config.js";
 import type { HealthSnapshot } from "./health.js";
 import type { Logger } from "./log.js";
 import { RunQueue, type StartedRun } from "./queue.js";
-import { buildRunArgv, parseRunRequest } from "./request.js";
+import { buildRunArgv, parseRunRequest, type RunRequest } from "./request.js";
 import type { AttachCredentials } from "./runner.js";
 
 type ErrorCode =
@@ -30,6 +34,7 @@ export type CreateAppOptions = {
   health?: HealthSnapshot;
   logger?: Pick<Logger, "error" | "info" | "warn">;
   mainServerUrl: string;
+  materialize?: MaterializeInlineFiles;
   packageVersion: string;
   queue?: RunQueue;
   startRun: (job: StartRunJob) => Promise<StartedRun>;
@@ -41,6 +46,11 @@ export const createRunServerApp = (options: CreateAppOptions) => {
   const queue = options.queue ?? new RunQueue(options.config);
   const health = options.health ?? { healthy: true, lastCheckAt: Date.now() };
   const stats = { failed: 0, total: 0 };
+  const startJob = createStartJob(
+    options,
+    options.materialize ?? materializeInlineFiles,
+    stats,
+  );
 
   app.get("/health", () =>
     json({ status: "ok", uptimeMs: Date.now() - startedAt }, 200),
@@ -85,25 +95,10 @@ export const createRunServerApp = (options: CreateAppOptions) => {
     if (!body.ok) return errorResponse(body.status, body.code, body.error, id);
     const parsed = parseRunRequest(body.value);
     if (!parsed.ok) return errorResponse(400, "VALIDATION", parsed.error, id);
-    const argv = buildRunArgv(parsed.value, {
-      attachUrl: options.mainServerUrl,
-      defaultDangerouslySkipPermissions:
-        options.config.dangerouslySkipPermissions,
-      opencodePath: options.config.opencodePath,
-    });
     try {
-      const submitted = await queue.submit(id, async () => {
-        const run = await options.startRun({
-          argv,
-          attach: attachCredentials(options.config.attach),
-          requestId: id,
-          timeoutMs: parsed.value.timeoutMs ?? options.config.runTimeoutMs,
-        });
-        void run.done.catch(() => {
-          stats.failed += 1;
-        });
-        return run;
-      });
+      const submitted = await queue.submit(id, () =>
+        startJob(id, parsed.value),
+      );
       if (!submitted.accepted)
         return queueFull(submitted.retryAfterSeconds, id);
       stats.total += 1;
@@ -125,6 +120,45 @@ export const createRunServerApp = (options: CreateAppOptions) => {
 
   return app;
 };
+
+type RunStats = { failed: number; total: number };
+
+const createStartJob =
+  (
+    options: CreateAppOptions,
+    materialize: MaterializeInlineFiles,
+    stats: RunStats,
+  ) =>
+  async (id: string, request: RunRequest): Promise<StartedRun> => {
+    const attachments = await materialize(request.inlineFiles);
+    const argv = buildRunArgv(request, {
+      attachUrl: options.mainServerUrl,
+      defaultDangerouslySkipPermissions:
+        options.config.dangerouslySkipPermissions,
+      extraFiles: attachments.paths,
+      opencodePath: options.config.opencodePath,
+    });
+    let run: StartedRun;
+    try {
+      run = await options.startRun({
+        argv,
+        attach: attachCredentials(options.config.attach),
+        requestId: id,
+        timeoutMs: request.timeoutMs ?? options.config.runTimeoutMs,
+      });
+    } catch (error) {
+      await attachments.cleanup();
+      throw error;
+    }
+    void run.done
+      .catch(() => {
+        stats.failed += 1;
+      })
+      .finally(() => {
+        void attachments.cleanup();
+      });
+    return run;
+  };
 
 const readJsonBody = async (
   request: Request,

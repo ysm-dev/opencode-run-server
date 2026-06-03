@@ -7,6 +7,35 @@ const flagValue = z
     message: "flag values must not start with '-'",
   });
 
+const base64Content = z
+  .string()
+  .min(1)
+  .refine(
+    (value) => value.length % 4 === 0 && /^[A-Za-z0-9+/]*={0,2}$/.test(value),
+    { message: "content must be standard base64" },
+  );
+
+const attachmentName = z
+  .string()
+  .min(1)
+  .max(255)
+  .refine((value) => !value.startsWith("-"), {
+    message: "filename must not start with '-'",
+  })
+  .refine(
+    (value) =>
+      !value.includes("/") &&
+      !value.includes("\\") &&
+      !value.includes("\0") &&
+      value !== "." &&
+      value !== "..",
+    { message: "filename must be a bare name without path separators" },
+  );
+
+const inlineFileSchema = z
+  .object({ content: base64Content, filename: attachmentName })
+  .strict();
+
 const runRequestSchema = z
   .object({
     agent: flagValue.optional(),
@@ -16,6 +45,7 @@ const runRequestSchema = z
     dir: flagValue,
     files: z.array(flagValue).optional(),
     fork: z.boolean().optional(),
+    inlineFiles: z.array(inlineFileSchema).optional(),
     model: flagValue.optional(),
     prompt: z.string().min(1).optional(),
     session: flagValue.optional(),
@@ -47,6 +77,7 @@ const runRequestSchema = z
   });
 
 export type RunRequest = z.infer<typeof runRequestSchema>;
+export type InlineFile = z.infer<typeof inlineFileSchema>;
 
 export type ParseRunRequestResult =
   | { ok: true; value: RunRequest }
@@ -55,6 +86,7 @@ export type ParseRunRequestResult =
 export type RunArgvContext = {
   attachUrl: string;
   defaultDangerouslySkipPermissions: boolean;
+  extraFiles?: string[];
   opencodePath: string;
 };
 
@@ -85,6 +117,7 @@ export const buildRunArgv = (request: RunRequest, context: RunArgvContext) => {
   if (request.fork === true) argv.push("--fork");
   pushOptional(argv, "--title", request.title);
   for (const file of request.files ?? []) pushOptional(argv, "-f", file);
+  for (const file of context.extraFiles ?? []) pushOptional(argv, "-f", file);
   pushOptional(argv, "--variant", request.variant);
   if (request.thinking === true) argv.push("--thinking");
   if (

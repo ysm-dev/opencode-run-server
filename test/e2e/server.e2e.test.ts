@@ -63,11 +63,89 @@ describe("server subprocess e2e", () => {
     await close(main);
     await waitForExit(child, 3000);
   }, 15_000);
+
+  it("decodes inline files to disk and attaches them via -f", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ors-e2e-"));
+    const argvFile = join(dir, "argv.json");
+    const attachFile = join(dir, "attachments.json");
+    const fakeOpencode = join(dir, "opencode");
+    await writeFile(
+      fakeOpencode,
+      fakeOpencodeWithAttachments(argvFile, attachFile),
+      "utf8",
+    );
+    await chmod(fakeOpencode, 0o755);
+
+    const main = createServer((_request, response) => {
+      response.writeHead(401);
+      response.end("auth required");
+    });
+    await listen(main, 0, "127.0.0.1");
+    const mainPort = addressPort(main);
+    const port = await reservePort();
+    const config = await createServerConfig(
+      {
+        bind: "127.0.0.1",
+        healthCheck: { failureThreshold: 2, intervalMs: 50, timeoutMs: 1000 },
+        opencodePath: fakeOpencode,
+        port,
+        runTimeoutMs: 5000,
+        shutdownGraceMs: 10,
+      },
+      { execPath: fakeOpencode },
+    );
+
+    const child = spawn("bun", ["src/server.ts"], {
+      cwd: process.cwd(),
+      env: serializeServerEnv(config, `http://127.0.0.1:${mainPort}/`),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    children.push(child);
+    await waitForHttp(`http://127.0.0.1:${port}/health`);
+
+    const response = await fetch(`http://127.0.0.1:${port}/run`, {
+      body: JSON.stringify({
+        dir,
+        inlineFiles: [
+          {
+            content: Buffer.from("PNGDATA").toString("base64"),
+            filename: "shot.png",
+          },
+        ],
+        prompt: "describe",
+      }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+    expect(response.status).toBe(202);
+
+    await waitForFile(attachFile);
+    expect(JSON.parse(await readFile(attachFile, "utf8"))).toEqual(["PNGDATA"]);
+    const argv = JSON.parse(await readFile(argvFile, "utf8")) as string[];
+    expect(argv).toContain("-f");
+    expect(argv.some((value) => value.endsWith("0-shot.png"))).toBe(true);
+
+    await close(main);
+    await waitForExit(child, 3000);
+  }, 15_000);
 });
 
 const fakeOpencodeScript = (argvFile: string) => `#!${process.execPath}
 const { writeFileSync } = require("node:fs")
 writeFileSync(${JSON.stringify(argvFile)}, JSON.stringify(process.argv.slice(2)))
+console.log(JSON.stringify({ type: "session", sessionID: "ses_1" }))
+`;
+
+const fakeOpencodeWithAttachments = (argvFile: string, attachFile: string) =>
+  `#!${process.execPath}
+const { writeFileSync, readFileSync } = require("node:fs")
+const argv = process.argv.slice(2)
+writeFileSync(${JSON.stringify(argvFile)}, JSON.stringify(argv))
+const contents = []
+for (let i = 0; i < argv.length - 1; i += 1) {
+  if (argv[i] === "-f") contents.push(readFileSync(argv[i + 1], "utf8"))
+}
+writeFileSync(${JSON.stringify(attachFile)}, JSON.stringify(contents))
 console.log(JSON.stringify({ type: "session", sessionID: "ses_1" }))
 `;
 

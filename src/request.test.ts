@@ -53,6 +53,51 @@ describe("run request validation and argv mapping", () => {
     ]);
   });
 
+  it("appends materialized attachment paths as -f after host files", () => {
+    const parsed = parseRunRequest({
+      dir: "/repo",
+      files: ["src/a.ts"],
+      prompt: "hi",
+    });
+    if (!parsed.ok) throw new Error(parsed.error);
+
+    expect(
+      buildRunArgv(parsed.value, {
+        ...context,
+        extraFiles: ["/tmp/ors-run-x/0-shot.png"],
+      }).join(" "),
+    ).toContain("-f src/a.ts -f /tmp/ors-run-x/0-shot.png");
+  });
+
+  it("accepts inline files and rejects malformed content or filenames", () => {
+    const valid = parseRunRequest({
+      dir: "/repo",
+      inlineFiles: [{ content: "AAAA", filename: "shot.png" }],
+      prompt: "hi",
+    });
+    expect(valid.ok).toBe(true);
+
+    const bad = (filename: string, content: string) =>
+      parseRunRequest({
+        dir: "/repo",
+        inlineFiles: [{ content, filename }],
+        prompt: "hi",
+      }).ok;
+
+    expect(bad("shot.png", "not base64!!")).toBe(false);
+    expect(bad("shot.png", "AAA")).toBe(false);
+    expect(bad("../escape.png", "AAAA")).toBe(false);
+    expect(bad("sub/shot.png", "AAAA")).toBe(false);
+    expect(bad("-shot.png", "AAAA")).toBe(false);
+    expect(
+      parseRunRequest({
+        dir: "/repo",
+        inlineFiles: [{ content: "AAAA", filename: "shot.png", mime: "x" }],
+        prompt: "hi",
+      }).ok,
+    ).toBe(false);
+  });
+
   it("permits prompts beginning with dashes by inserting -- first", () => {
     const parsed = parseRunRequest({ dir: "/repo", prompt: "--share secrets" });
     if (!parsed.ok) throw new Error(parsed.error);
