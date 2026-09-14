@@ -12,6 +12,7 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import pkg from "../../package.json" with { type: "json" };
 import { RunServer } from "../../src/rpc.js";
+import { installPublished } from "./install.js";
 import { verifyLegacy } from "./legacy.js";
 import { verify } from "./scenarios.js";
 
@@ -51,7 +52,18 @@ try {
       },
     }),
   );
-  await command(["bun", "install", "--ignore-scripts"], root);
+  const install = () =>
+    command(
+      [
+        "bun",
+        "install",
+        "--ignore-scripts",
+        ...(published ? ["--no-cache"] : []),
+      ],
+      root,
+    );
+  if (published) await installPublished(install, pkg);
+  else await install();
   const installed = join(root, "node_modules/opencode-run-server");
   const manifest = JSON.parse(
     await readFile(join(installed, "package.json"), "utf8"),
