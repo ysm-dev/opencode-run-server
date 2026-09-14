@@ -1,18 +1,24 @@
 {
   "name": "opencode-run-server",
-  "version": "0.1.0",
-  "description": "opencode plugin that supervises a Hono HTTP subprocess exposing POST /run to trigger non-interactive `opencode run --attach` invocations against the same opencode server.",
+  "version": "0.2.0",
+  "description": "OpenCode v2 plugin with a backwards-compatible /run HTTP API and native plugin RPC for bounded, non-interactive session runs.",
   "type": "module",
   "main": "./dist/plugin.js",
   "exports": {
     ".": {
       "types": "./dist/plugin.d.ts",
       "import": "./dist/plugin.js"
+    },
+    "./rpc": {
+      "types": "./dist/rpc.d.ts",
+      "import": "./dist/rpc.js"
     }
   },
   "files": [
     "dist/",
-    "src/"
+    "index.js",
+    "rpc.js",
+    "README.md"
   ],
   "scripts": {
     "check": "biome ci .",
@@ -21,7 +27,8 @@
     "knip": "knip",
     "test": "vitest run --coverage",
     "test:watch": "vitest",
-    "build": "bun build src/plugin.ts src/server.ts --outdir dist --target node"
+    "build": "bun run script/build.ts",
+    "verify:package": "bun run test/e2e/package.ts"
   },
   "license": "MIT",
   "author": "ysm-dev <i@ysm.dev>",
@@ -37,18 +44,22 @@
     "opencode",
     "opencode-plugin",
     "plugin",
-    "hono",
     "tailscale",
     "run-server"
   ],
   "dependencies": {
     "@hono/node-server": "^2.0.4",
-    "@opencode-ai/plugin": "1.15.13",
+    "@opencode/client": "2.0.3",
+    "@opencode/plugin": "2.0.3",
     "hono": "^4.12.23",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@biomejs/biome": "2.3.12",
+    "@opencode/sdk": "2.0.3",
+    "@opencode/schema": "2.0.3",
+    "@opencode/server": "2.0.3",
+    "effect": "4.0.0-rc.112",
     "@types/bun": "^1.3.14",
     "@types/node": "^24.12.4",
     "@typescript/native-preview": "^7.0.0-dev.20260602.1",

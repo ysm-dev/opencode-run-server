@@ -1,231 +1,297 @@
-import { spawn as nodeSpawn } from "node:child_process";
-import type { Readable } from "node:stream";
-import { z } from "zod";
-import type { Logger } from "./log.js";
+import { randomUUID } from "node:crypto";
+import type { Plugin } from "@opencode/plugin";
+import { attachments } from "./attachments.js";
+import type { Config } from "./config.js";
+import { modelRef, type RunRequest } from "./request.js";
 
-export type AttachCredentials = {
-  password?: string;
-  username?: string;
+export type RunContext = {
+  location: { directory: string; workspaceID?: string | undefined };
+  session: Pick<
+    Plugin.Context["session"],
+    | "create"
+    | "get"
+    | "switchAgent"
+    | "switchModel"
+    | "rename"
+    | "prompt"
+    | "command"
+    | "wait"
+    | "interrupt"
+  >;
+  catalog: { model: Pick<Plugin.Context["catalog"]["model"], "default"> };
 };
 
-type RunSpawnOptions = {
-  detached: true;
-  env: Record<string, string>;
-  shell: false;
-  stdio: ["ignore", "pipe", "pipe"];
-};
-
-export interface SpawnedRunProcess {
-  pid?: number | undefined;
-  stderr: Readable;
-  stdout: Readable;
-  kill(signal?: NodeJS.Signals): boolean;
-  once(event: "error", listener: (error: Error) => void): this;
-  once(
-    event: "exit",
-    listener: (code: number | null, signal: NodeJS.Signals | null) => void,
-  ): this;
-  once(event: "spawn", listener: () => void): this;
-}
-
-export type RunSpawner = (
-  file: string,
-  args: string[],
-  options: RunSpawnOptions,
-) => SpawnedRunProcess;
-
-export type RunManagerOptions = {
-  killProcessGroup?: (pid: number, signal: NodeJS.Signals) => boolean;
-  logger: Pick<Logger, "error" | "info" | "warn">;
-  shutdownGraceMs: number;
-  spawn?: RunSpawner;
-};
-
-export type StartRunInput = {
-  argv: string[];
-  attach: AttachCredentials;
+type Run = {
   requestId: string;
-  timeoutMs: number;
-};
-
-export type StartedManagedRun = {
+  request: RunRequest;
+  controller: AbortController;
+  sessionID?: string;
+  cancelled?: string;
+  interruption?: Promise<unknown>;
+  admissions: Map<string, ReturnType<typeof Promise.withResolvers<void>>>;
   done: Promise<void>;
 };
 
-type ActiveRun = {
-  killTimer?: ReturnType<typeof setTimeout>;
-  pid: number;
-  termTimer?: ReturnType<typeof setTimeout>;
+export type RunResult = {
+  requestId: string;
+  sessionID: string | undefined;
+  error?: string;
 };
 
-const eventSchema = z
-  .object({
-    error: z.string().optional(),
-    sessionID: z.string().optional(),
-    sessionId: z.string().optional(),
-    type: z.string().optional(),
-  })
-  .passthrough();
-
-export const createRunEnvironment = (
-  attach: AttachCredentials,
-): Record<string, string> => ({
-  OPENCODE_RUN_SERVER_CHILD: "1",
-  ...(attach.password === undefined
-    ? {}
-    : { OPENCODE_SERVER_PASSWORD: attach.password }),
-  ...(attach.username === undefined
-    ? {}
-    : { OPENCODE_SERVER_USERNAME: attach.username }),
-});
-
-export const killProcessGroup = (pid: number, signal: NodeJS.Signals) => {
-  try {
-    process.kill(-pid, signal);
-    return true;
-  } catch (error) {
-    if (errorCode(error) === "ESRCH") return false;
-    throw error;
-  }
-};
+export type PluginEvent =
+  ReturnType<Plugin.Context["event"]["subscribe"]> extends AsyncIterable<
+    infer Event
+  >
+    ? Event
+    : never;
 
 export class RunManager {
-  readonly #active = new Map<string, ActiveRun>();
-  readonly #killProcessGroup: (pid: number, signal: NodeJS.Signals) => boolean;
-  readonly #logger: Pick<Logger, "error" | "info" | "warn">;
-  readonly #shutdownGraceMs: number;
-  readonly #spawn: RunSpawner;
+  readonly #runs = new Set<Run>();
+  #stopped = false;
 
-  constructor(options: RunManagerOptions) {
-    this.#killProcessGroup = options.killProcessGroup ?? killProcessGroup;
-    this.#logger = options.logger;
-    this.#shutdownGraceMs = options.shutdownGraceMs;
-    this.#spawn = options.spawn ?? defaultSpawn;
-  }
+  constructor(
+    readonly context: RunContext,
+    readonly config: Config,
+    readonly report: (result: RunResult) => void,
+  ) {}
 
-  async start(input: StartRunInput): Promise<StartedManagedRun> {
-    const command = input.argv[0];
-    if (command === undefined)
-      throw new Error("argv must include opencode path");
-    const child = this.#spawn(command, input.argv.slice(1), {
-      detached: true,
-      env: createRunEnvironment(input.attach),
-      shell: false,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    await waitForSpawn(child);
-    if (child.pid === undefined)
-      throw new Error("spawned process did not expose a pid");
-    const output = new OutputTail();
-    child.stdout.on("data", (chunk: Buffer | string) =>
-      output.add(String(chunk)),
+  async start(requestId: string, request: RunRequest) {
+    if (this.#stopped) throw new Error("Plugin is shutting down");
+    const admitted = Promise.withResolvers<void>();
+    const run: Run = {
+      requestId,
+      request,
+      controller: new AbortController(),
+      admissions: new Map(),
+      done: Promise.resolve(),
+    };
+    this.#runs.add(run);
+    const timer = setTimeout(
+      () => this.cancel(run, "Run timed out"),
+      request.timeoutMs ?? this.config.runTimeoutMs,
     );
-    child.stderr.on("data", (chunk: Buffer | string) =>
-      output.add(String(chunk)),
-    );
-    const done = this.#track(input.requestId, child, input.timeoutMs, output);
-    return { done };
-  }
-
-  async killAll() {
-    const active = [...this.#active.values()];
-    if (active.length === 0) return;
-    for (const run of active) this.#killProcessGroup(run.pid, "SIGTERM");
-    await new Promise((resolve) => setTimeout(resolve, this.#shutdownGraceMs));
-    for (const run of active) this.#killProcessGroup(run.pid, "SIGKILL");
-  }
-
-  activeCount() {
-    return this.#active.size;
-  }
-
-  #track(
-    requestId: string,
-    child: SpawnedRunProcess,
-    timeoutMs: number,
-    output: OutputTail,
-  ) {
-    const pid = child.pid ?? 0;
-    const active: ActiveRun = { pid };
-    this.#active.set(requestId, active);
-    active.termTimer = setTimeout(() => {
-      this.#killProcessGroup(pid, "SIGTERM");
-      active.killTimer = setTimeout(
-        () => this.#killProcessGroup(pid, "SIGKILL"),
-        this.#shutdownGraceMs,
-      );
-    }, timeoutMs);
-    return new Promise<void>((resolve) => {
-      child.once("exit", (code, signal) => {
-        this.#clearTimers(active);
-        this.#active.delete(requestId);
-        const fields = parseOutputFields(output.value());
-        void this.#logger.info("run exited", {
-          code: code ?? -1,
-          requestId,
-          signal: signal ?? "",
-          ...fields,
-        });
-        resolve();
+    run.done = this.execute(run, admitted.resolve)
+      .then(
+        () => this.report({ requestId, sessionID: run.sessionID }),
+        (error: unknown) => {
+          admitted.reject(error);
+          this.report({
+            requestId,
+            sessionID: run.sessionID,
+            error:
+              run.cancelled ??
+              (error instanceof Error
+                ? error.message || error.name
+                : String(error)),
+          });
+        },
+      )
+      .finally(() => {
+        clearTimeout(timer);
+        this.#runs.delete(run);
       });
-    });
+    await admitted.promise;
+    return { done: run.done };
   }
 
-  #clearTimers(active: ActiveRun) {
-    if (active.termTimer !== undefined) clearTimeout(active.termTimer);
-    if (active.killTimer !== undefined) clearTimeout(active.killTimer);
+  async dispose() {
+    this.#stopped = true;
+    const runs = [...this.#runs];
+    for (const run of runs) this.cancel(run, "Plugin unloaded");
+    await Promise.all(runs.map((run) => run.done));
+  }
+
+  // Child sessions inherit the headless policy of their managed root run.
+  async owner(sessionID: string): Promise<Run | undefined> {
+    const seen = new Set<string>();
+    let current: string | undefined = sessionID;
+    while (current !== undefined && !seen.has(current)) {
+      const owned = [...this.#runs].find((run) => run.sessionID === current);
+      if (owned !== undefined) return owned;
+      if (this.#runs.size === 0) return;
+      seen.add(current);
+      const session = await this.context.session.get({ sessionID: current });
+      current = session.parentID;
+    }
+  }
+
+  cancel(run: Run, reason: string) {
+    if (run.cancelled !== undefined) return;
+    run.cancelled = reason;
+    run.controller.abort(new Error(reason));
+    for (const admission of run.admissions.values())
+      admission.reject(new Error(reason));
+    // V2's in-process Promise adapter currently ignores request-option signals.
+    // Interrupt now rather than waiting for the client wait to reject.
+    if (run.sessionID !== undefined) {
+      run.interruption = this.context.session.interrupt({
+        sessionID: run.sessionID,
+        continue: false,
+      });
+      void run.interruption.catch(() => {});
+    }
+  }
+
+  admitting(sessionID: string, id: string) {
+    const run = [...this.#runs].find((run) => run.sessionID === sessionID);
+    if (run === undefined || run.admissions.has(id)) return;
+    const admission = Promise.withResolvers<void>();
+    void admission.promise.catch(() => {});
+    run.admissions.set(id, admission);
+  }
+
+  observe(event: PluginEvent) {
+    if (event.type === "session.inbox.delivered") {
+      for (const run of this.#runs) {
+        if (run.sessionID === event.data.sessionID)
+          run.admissions.get(event.data.inboxID)?.resolve();
+      }
+    }
+    if (
+      event.type !== "session.execution.failed" &&
+      event.type !== "session.execution.interrupted"
+    )
+      return;
+    for (const run of this.#runs) {
+      if (run.sessionID !== event.data.sessionID) continue;
+      const message =
+        event.type === "session.execution.failed"
+          ? event.data.error.message
+          : `Session interrupted: ${event.data.reason}`;
+      for (const admission of run.admissions.values())
+        admission.reject(new Error(message));
+    }
+  }
+
+  private async execute(run: Run, admitted: () => void) {
+    const { signal } = run.controller;
+    try {
+      const session = await this.target(run);
+      signal.throwIfAborted();
+      await this.configure(run, session.id, session.model);
+      signal.throwIfAborted();
+      const prompt = {
+        sessionID: session.id,
+        text: run.request.prompt ?? "",
+        files: attachments(run.request, this.context.location.directory),
+        delivery: "steer" as const,
+      };
+      if (run.request.command !== undefined) {
+        await this.context.session.command(
+          { ...prompt, command: run.request.command },
+          { signal },
+        );
+      } else {
+        const id = `msg_${randomUUID()}`;
+        this.admitting(session.id, id);
+        await this.context.session.prompt({ ...prompt, id }, { signal });
+      }
+      // A late admission may schedule work after the first interrupt was a no-op.
+      if (signal.aborted) delete run.interruption;
+      signal.throwIfAborted();
+      admitted();
+      // Admission precedes the advisory wake; delivery is the execution barrier.
+      await Promise.all(
+        [...run.admissions.values()].map((admission) => admission.promise),
+      );
+      signal.throwIfAborted();
+      await this.context.session.wait({ sessionID: session.id }, { signal });
+      signal.throwIfAborted();
+      const result = await this.context.session.get(
+        { sessionID: session.id },
+        { signal },
+      );
+      if (result.outcome === "failed" || result.outcome === "interrupted") {
+        throw new Error(`Session ${result.outcome}`);
+      }
+      if (run.admissions.size > 0 && result.outcome !== "succeeded")
+        throw new Error("Session ended without a successful outcome");
+    } finally {
+      // Aborting a client wait does not stop durable server execution.
+      if (run.cancelled !== undefined && run.sessionID !== undefined) {
+        await (run.interruption ??
+          this.context.session.interrupt({
+            sessionID: run.sessionID,
+            continue: false,
+          }));
+      }
+    }
+  }
+
+  private async target(run: Run) {
+    const session =
+      run.request.session === undefined
+        ? // Creation is allowed to finish so cleanup can interrupt the returned ID.
+          await this.context.session.create({
+            location: {
+              directory: this.context.location.directory,
+              ...(this.context.location.workspaceID === undefined
+                ? {}
+                : { workspaceID: this.context.location.workspaceID }),
+            },
+          })
+        : await this.context.session.get(
+            { sessionID: run.request.session },
+            { signal: run.controller.signal },
+          );
+    if (
+      session.location.directory !== this.context.location.directory ||
+      session.location.workspaceID !== this.context.location.workspaceID
+    ) {
+      throw new Error("Session belongs to a different RPC location");
+    }
+    if (
+      [...this.#runs].some(
+        (active) => active !== run && active.sessionID === session.id,
+      )
+    ) {
+      throw new Error("Session already has a managed run");
+    }
+    run.sessionID = session.id;
+    return session;
+  }
+
+  private async configure(
+    run: Run,
+    sessionID: string,
+    current: Awaited<ReturnType<RunContext["session"]["get"]>>["model"],
+  ) {
+    const { signal } = run.controller;
+    const { request } = run;
+    const selected =
+      request.model !== undefined
+        ? modelRef(request.model, request.variant)
+        : request.variant !== undefined
+          ? (current ??
+            (await this.context.catalog.model.default()).data ??
+            undefined)
+          : undefined;
+    if (request.variant !== undefined && selected === undefined) {
+      throw new Error("Cannot select a variant before selecting a model");
+    }
+    if (selected !== undefined) {
+      await this.context.session.switchModel(
+        {
+          sessionID,
+          model: {
+            ...selected,
+            ...(request.variant === undefined
+              ? {}
+              : { variant: request.variant }),
+          },
+        },
+        { signal },
+      );
+    }
+    if (request.agent !== undefined)
+      await this.context.session.switchAgent(
+        { sessionID, agent: request.agent },
+        { signal },
+      );
+    if (request.title !== undefined)
+      await this.context.session.rename(
+        { sessionID, title: request.title },
+        { signal },
+      );
   }
 }
-
-class OutputTail {
-  #value = "";
-
-  add(chunk: string) {
-    this.#value = `${this.#value}${chunk}`.slice(-4096);
-  }
-
-  value() {
-    return this.#value;
-  }
-}
-
-const parseOutputFields = (tail: string) => {
-  let sessionId = "";
-  let error = "";
-  for (const line of tail.split(/\r?\n/)) {
-    if (line.trim().length === 0) continue;
-    const parsedJson = parseJson(line);
-    if (parsedJson === undefined) continue;
-    const event = eventSchema.safeParse(parsedJson);
-    if (!event.success) continue;
-    sessionId = event.data.sessionID ?? event.data.sessionId ?? sessionId;
-    error = event.data.error ?? error;
-  }
-  return { error, sessionId, tail };
-};
-
-const parseJson = (line: string) => {
-  try {
-    const parsed: unknown = JSON.parse(line);
-    return parsed;
-  } catch {
-    return undefined;
-  }
-};
-
-const waitForSpawn = (child: SpawnedRunProcess) =>
-  new Promise<void>((resolve, reject) => {
-    child.once("spawn", resolve);
-    child.once("error", reject);
-  });
-
-/* v8 ignore next -- real spawn path is exercised by e2e subprocess tests */
-const defaultSpawn: RunSpawner = (file, args, options) =>
-  nodeSpawn(file, args, options);
-
-const errorCode = (error: unknown) => {
-  if (typeof error === "object" && error !== null && "code" in error)
-    return String(error.code);
-  /* v8 ignore next -- process.kill errors expose code in supported runtimes */
-  return undefined;
-};

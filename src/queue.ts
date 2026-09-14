@@ -1,4 +1,4 @@
-export type StartedRun = {
+type StartedRun = {
   done: Promise<void>;
 };
 
@@ -65,6 +65,7 @@ export class RunQueue {
     this.#stopped = true;
     for (const item of this.#items) {
       if (item.timer !== undefined) clearTimeout(item.timer);
+      this.onDrop?.(item.requestId);
     }
     this.#items = [];
   }

@@ -133,4 +133,26 @@ describe("structured logging", () => {
     await logger.info("ok");
     expect(await readFile(file, "utf8")).toContain("ok");
   });
+
+  it("serializes rotation across location loggers sharing one file", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ors-log-"));
+    const file = join(dir, "server.log");
+    const options = {
+      file,
+      level: "info" as const,
+      maxFiles: 3,
+      maxSize: "1",
+      secrets: [],
+    };
+    const first = createFileLogger(options);
+    const second = createFileLogger(options);
+    await Promise.all([
+      first.info("one"),
+      second.info("two"),
+      first.info("three"),
+    ]);
+    expect(await readFile(`${file}.2`, "utf8")).toContain("one");
+    expect(await readFile(`${file}.1`, "utf8")).toContain("two");
+    expect(await readFile(file, "utf8")).toContain("three");
+  });
 });

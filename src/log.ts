@@ -46,9 +46,12 @@ export const redactSecrets = (value: string, secrets: string[]) => {
   return redacted;
 };
 
+// Location-scoped plugin instances can write the same configured log file.
+const writes = new Map<string, Promise<void>>();
+
 export const createFileLogger = (options: FileLoggerOptions): Logger => {
   const maxBytes = parseSize(options.maxSize);
-  const write = async (
+  const append = async (
     level: LogLevel,
     message: string,
     fields: LogFields = {},
@@ -63,6 +66,17 @@ export const createFileLogger = (options: FileLoggerOptions): Logger => {
       Buffer.byteLength(line),
     );
     await appendFile(options.file, line, "utf8");
+  };
+  const write: typeof append = (level, message, fields) => {
+    const pending = (writes.get(options.file) ?? Promise.resolve())
+      .catch(() => {})
+      .then(() => append(level, message, fields));
+    writes.set(options.file, pending);
+    const finished = () => {
+      if (writes.get(options.file) === pending) writes.delete(options.file);
+    };
+    void pending.then(finished, finished);
+    return pending;
   };
   return {
     debug: (message, fields) => write("debug", message, fields),

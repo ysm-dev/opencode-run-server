@@ -1,145 +1,107 @@
 import { describe, expect, it } from "vitest";
-import { buildRunArgv, parseRunRequest } from "./request.js";
+import { attachments } from "./attachments.js";
+import { modelRef, runRequestSchema } from "./request.js";
+import { RunServer } from "./rpc.js";
 
-const context = {
-  attachUrl: "http://127.0.0.1:4096/",
-  defaultDangerouslySkipPermissions: false,
-  opencodePath: "/opt/opencode",
-};
+describe("v2 run contract", () => {
+  it("requires a prompt or command and rejects removed v1 fields", () => {
+    expect(runRequestSchema.safeParse({}).success).toBe(false);
+    for (const field of [
+      "dir",
+      "continue",
+      "fork",
+      "thinking",
+      "attach",
+      "format",
+      "port",
+    ]) {
+      expect(
+        runRequestSchema.safeParse({ prompt: "test", [field]: true }).success,
+      ).toBe(false);
+    }
+    expect(runRequestSchema.parse({ command: "review" })).toEqual({
+      command: "review",
+    });
+    expect(
+      runRequestSchema.parse({ prompt: "-literal", title: "--title" }).title,
+    ).toBe("--title");
+  });
 
-describe("run request validation and argv mapping", () => {
-  it("maps every whitelisted field to an argv array without a shell", () => {
-    const parsed = parseRunRequest({
-      dir: "/repo",
-      prompt: "fix bug",
-      model: "anthropic/claude",
-      agent: "builder",
-      continue: true,
-      title: "Bug fix",
-      files: ["src/a.ts", "src/b.ts"],
+  it("validates model references and bounded timeouts", () => {
+    for (const model of [
+      "model",
+      "/model",
+      "provider/",
+      "provider/model#",
+      "provider/model#high#low",
+    ]) {
+      expect(
+        runRequestSchema.safeParse({ prompt: "test", model }).success,
+      ).toBe(false);
+    }
+    for (const timeoutMs of [0, -1, 1.5, 2_147_483_648]) {
+      expect(
+        runRequestSchema.safeParse({ prompt: "test", timeoutMs }).success,
+      ).toBe(false);
+    }
+    expect(modelRef("provider/org/model#high")).toEqual({
+      providerID: "provider",
+      id: "org/model",
       variant: "high",
-      thinking: true,
-      dangerouslySkipPermissions: true,
     });
+    expect(modelRef("provider/model")).toEqual({
+      providerID: "provider",
+      id: "model",
+    });
+    expect(modelRef("provider/model#high", "low").variant).toBe("low");
+  });
 
-    if (!parsed.ok) throw new Error(parsed.error);
+  it("validates inline filenames and canonical base64", () => {
+    for (const filename of ["../a", "a/b", "a\\b", "\0", ".", "..", ""]) {
+      expect(
+        runRequestSchema.safeParse({
+          prompt: "test",
+          inlineFiles: [{ filename, content: "YQ==" }],
+        }).success,
+      ).toBe(false);
+    }
+    for (const content of ["YQ", "YQ==\n", "YR==", "%%%%", ""]) {
+      expect(
+        runRequestSchema.safeParse({
+          prompt: "test",
+          inlineFiles: [{ filename: "a", content }],
+        }).success,
+      ).toBe(false);
+    }
+  });
 
-    expect(buildRunArgv(parsed.value, context)).toEqual([
-      "/opt/opencode",
-      "run",
-      "--attach",
-      "http://127.0.0.1:4096/",
-      "--format",
-      "json",
-      "--dir",
-      "/repo",
-      "-m",
-      "anthropic/claude",
-      "--agent",
-      "builder",
-      "-c",
-      "--title",
-      "Bug fix",
-      "-f",
-      "src/a.ts",
-      "-f",
-      "src/b.ts",
-      "--variant",
-      "high",
-      "--thinking",
-      "--dangerously-skip-permissions",
-      "--",
-      "fix bug",
+  it("maps host files and inline files to native URI attachments", () => {
+    expect(attachments({ prompt: "test" }, "/project")).toEqual([]);
+    expect(
+      attachments(
+        {
+          files: ["a b.txt", "/absolute/image.png"],
+          inlineFiles: [{ filename: "note.txt", content: "YQ==" }],
+        },
+        "/project",
+      ),
+    ).toEqual([
+      { uri: "file:///project/a%20b.txt", name: "a b.txt" },
+      { uri: "file:///absolute/image.png", name: "image.png" },
+      { uri: "data:application/octet-stream;base64,YQ==", name: "note.txt" },
     ]);
   });
 
-  it("appends materialized attachment paths as -f after host files", () => {
-    const parsed = parseRunRequest({
-      dir: "/repo",
-      files: ["src/a.ts"],
-      prompt: "hi",
-    });
-    if (!parsed.ok) throw new Error(parsed.error);
-
-    expect(
-      buildRunArgv(parsed.value, {
-        ...context,
-        extraFiles: ["/tmp/ors-run-x/0-shot.png"],
-      }).join(" "),
-    ).toContain("-f src/a.ts -f /tmp/ors-run-x/0-shot.png");
-  });
-
-  it("accepts inline files and rejects malformed content or filenames", () => {
-    const valid = parseRunRequest({
-      dir: "/repo",
-      inlineFiles: [{ content: "AAAA", filename: "shot.png" }],
-      prompt: "hi",
-    });
-    expect(valid.ok).toBe(true);
-
-    const bad = (filename: string, content: string) =>
-      parseRunRequest({
-        dir: "/repo",
-        inlineFiles: [{ content, filename }],
-        prompt: "hi",
-      }).ok;
-
-    expect(bad("shot.png", "not base64!!")).toBe(false);
-    expect(bad("shot.png", "AAA")).toBe(false);
-    expect(bad("../escape.png", "AAAA")).toBe(false);
-    expect(bad("sub/shot.png", "AAAA")).toBe(false);
-    expect(bad("-shot.png", "AAAA")).toBe(false);
-    expect(
-      parseRunRequest({
-        dir: "/repo",
-        inlineFiles: [{ content: "AAAA", filename: "shot.png", mime: "x" }],
-        prompt: "hi",
-      }).ok,
-    ).toBe(false);
-  });
-
-  it("permits prompts beginning with dashes by inserting -- first", () => {
-    const parsed = parseRunRequest({ dir: "/repo", prompt: "--share secrets" });
-    if (!parsed.ok) throw new Error(parsed.error);
-
-    expect(buildRunArgv(parsed.value, context).slice(-2)).toEqual([
-      "--",
-      "--share secrets",
+  it("exports the typed RPC definition with explicit schemas and errors", () => {
+    expect(RunServer.id).toBe("opencode-run-server");
+    expect(RunServer.methods.status.input.parse(undefined)).toBeUndefined();
+    expect(() =>
+      RunServer.methods.status.input.parse({ unexpected: true }),
+    ).toThrow();
+    expect(Object.keys(RunServer.methods.run.errors)).toEqual([
+      "queue_full",
+      "input_too_large",
+      "start_failed",
     ]);
-  });
-
-  it("supports slash-command runs without a prompt", () => {
-    const parsed = parseRunRequest({ dir: "/repo", command: "commit" });
-    if (!parsed.ok) throw new Error(parsed.error);
-
-    expect(buildRunArgv(parsed.value, context).slice(-3)).toEqual([
-      "--command",
-      "commit",
-      "--",
-    ]);
-  });
-
-  it("rejects unknown, forbidden, and flag-injection fields", () => {
-    expect(parseRunRequest({ dir: "/repo", prompt: "x", share: true }).ok).toBe(
-      false,
-    );
-    expect(
-      parseRunRequest({ dir: "/repo", prompt: "x", format: "text" }).ok,
-    ).toBe(false);
-    expect(parseRunRequest({ dir: "-rf", prompt: "x" }).ok).toBe(false);
-    expect(
-      parseRunRequest({ dir: "/repo", prompt: "x", files: ["--flag"] }).ok,
-    ).toBe(false);
-  });
-
-  it("requires prompt or command and requires fork to target a session", () => {
-    expect(parseRunRequest({ dir: "/repo" }).ok).toBe(false);
-    expect(parseRunRequest({ dir: "/repo", prompt: "x", fork: true }).ok).toBe(
-      false,
-    );
-    expect(
-      parseRunRequest({ dir: "/repo", prompt: "x", session: "ses", fork: true })
-        .ok,
-    ).toBe(true);
   });
 });

@@ -1,292 +1,252 @@
-import { EventEmitter } from "node:events";
-import { PassThrough } from "node:stream";
-import { describe, expect, it, vi } from "vitest";
-import type { SpawnedRunProcess } from "./runner.js";
-import {
-  createRunEnvironment,
-  killProcessGroup,
-  RunManager,
-} from "./runner.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { runFixture, sessionInfo } from "../test/fixture.js";
+import { parseOptions } from "./config.js";
+import { RunManager } from "./runner.js";
 
-class FakeChild extends EventEmitter implements SpawnedRunProcess {
-  readonly stderr = new PassThrough();
-  readonly stdout = new PassThrough();
-  readonly pid: number | undefined;
+const managers: RunManager[] = [];
+afterEach(async () => {
+  await Promise.all(managers.splice(0).map((manager) => manager.dispose()));
+  vi.useRealTimers();
+});
 
-  constructor(pid: number | null = 1234) {
-    super();
-    this.pid = pid ?? undefined;
-  }
+const fixture = (options: object = {}) => {
+  const state = runFixture();
+  const report = vi.fn();
+  const manager = new RunManager(state.context, parseOptions(options), report);
+  state.admissions.add((sessionID, inboxID) =>
+    manager.observe({
+      id: "evt_delivered",
+      created: 0,
+      type: "session.inbox.delivered",
+      durable: { aggregateID: sessionID, seq: 1, version: 1 },
+      data: { sessionID, inboxID },
+    }),
+  );
+  managers.push(manager);
+  return { ...state, manager, report };
+};
 
-  kill() {
-    return true;
-  }
-}
-
-describe("RunManager", () => {
-  it("creates a sanitized child environment with attach credentials only", () => {
-    expect(createRunEnvironment({ username: "u", password: "p" })).toEqual({
-      OPENCODE_RUN_SERVER_CHILD: "1",
-      OPENCODE_SERVER_PASSWORD: "p",
-      OPENCODE_SERVER_USERNAME: "u",
+describe("native session runs", () => {
+  it("admits a configured prompt and holds capacity until session completion", async () => {
+    const f = fixture();
+    const run = await f.manager.start("rq_1", {
+      prompt: "review",
+      model: "provider/model#high",
+      agent: "build",
+      title: "Review",
+      files: ["a.txt"],
+      inlineFiles: [{ filename: "b.txt", content: "YQ==" }],
     });
-  });
-
-  it("spawns opencode run detached, without shell interpolation", async () => {
-    const spawned: string[][] = [];
-    const child = new FakeChild();
-    const manager = new RunManager({
-      killProcessGroup: () => true,
-      logger: {
-        info: async () => {},
-        warn: async () => {},
-        error: async () => {},
-      },
-      shutdownGraceMs: 5,
-      spawn: (file, args, options) => {
-        spawned.push([
-          file,
-          ...args,
-          String(options.detached),
-          String(options.shell),
-        ]);
-        queueMicrotask(() => child.emit("spawn"));
-        return child;
-      },
+    expect(f.context.session.create).toHaveBeenCalledWith({
+      location: { directory: "/project" },
     });
-
-    await manager.start({
-      attach: {},
-      argv: ["/opt/opencode", "run", "--", "hi"],
-      requestId: "rq_1",
-      timeoutMs: 1000,
-    });
-
-    expect(spawned).toEqual([
-      ["/opt/opencode", "run", "--", "hi", "true", "false"],
-    ]);
-    child.emit("exit", 0, null);
-  });
-
-  it("terminates timed-out runs with SIGTERM then SIGKILL", async () => {
-    vi.useFakeTimers();
-    const child = new FakeChild();
-    const signals: string[] = [];
-    const manager = new RunManager({
-      killProcessGroup: (_pid, signal) => {
-        signals.push(signal);
-        return true;
+    expect(f.context.session.switchModel).toHaveBeenCalledWith(
+      {
+        sessionID: "ses_1",
+        model: { providerID: "provider", id: "model", variant: "high" },
       },
-      logger: {
-        info: async () => {},
-        warn: async () => {},
-        error: async () => {},
-      },
-      shutdownGraceMs: 5,
-      spawn: () => {
-        queueMicrotask(() => child.emit("spawn"));
-        return child;
-      },
-    });
-
-    await manager.start({
-      attach: {},
-      argv: ["/bin/opencode", "run"],
-      requestId: "rq_1",
-      timeoutMs: 10,
-    });
-    await vi.advanceTimersByTimeAsync(10);
-    expect(signals).toEqual(["SIGTERM"]);
-    await vi.advanceTimersByTimeAsync(5);
-    expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
-    child.emit("exit", null, "SIGKILL");
-    vi.useRealTimers();
-  });
-
-  it("logs parsed session and error fields from json output", async () => {
-    const child = new FakeChild();
-    const logs: string[] = [];
-    const manager = new RunManager({
-      killProcessGroup: () => true,
-      logger: {
-        error: async () => {},
-        info: async (_message, fields) => {
-          logs.push(`${fields?.sessionId}:${fields?.error}`);
-        },
-        warn: async () => {},
-      },
-      shutdownGraceMs: 5,
-      spawn: () => {
-        queueMicrotask(() => child.emit("spawn"));
-        return child;
-      },
-    });
-
-    const run = await manager.start({
-      attach: {},
-      argv: ["/bin/opencode", "run"],
-      requestId: "rq_1",
-      timeoutMs: 1000,
-    });
-    child.stdout.write(
-      `${JSON.stringify({ sessionID: "ses_1" })}\nnot-json\n${JSON.stringify({ error: "bad" })}\n`,
+      expect.anything(),
     );
-    child.emit("exit", 1, null);
+    expect(f.context.session.switchAgent).toHaveBeenCalledWith(
+      { sessionID: "ses_1", agent: "build" },
+      expect.anything(),
+    );
+    expect(f.context.session.rename).toHaveBeenCalledWith(
+      { sessionID: "ses_1", title: "Review" },
+      expect.anything(),
+    );
+    expect(f.context.session.prompt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: "review",
+        delivery: "steer",
+        files: expect.any(Array),
+      }),
+      expect.anything(),
+    );
+    expect(f.report).not.toHaveBeenCalled();
+    f.complete();
     await run.done;
+    expect(f.report).toHaveBeenCalledWith({
+      requestId: "rq_1",
+      sessionID: "ses_1",
+    });
+  });
 
-    expect(logs).toEqual(["ses_1:bad"]);
-    expect(manager.activeCount()).toBe(0);
+  it("executes a command without requiring prompt text", async () => {
+    const f = fixture();
+    const run = await f.manager.start("rq", { command: "review" });
+    expect(f.context.session.command).toHaveBeenCalledWith(
+      {
+        sessionID: "ses_1",
+        command: "review",
+        text: "",
+        files: [],
+        delivery: "steer",
+      },
+      expect.anything(),
+    );
+    expect(f.context.session.prompt).not.toHaveBeenCalled();
+    f.complete();
+    await run.done;
+  });
+
+  it("reuses sessions and applies variants to their current model", async () => {
+    const f = fixture();
+    f.sessions.set(
+      "ses_existing",
+      sessionInfo("ses_existing", { model: { providerID: "p", id: "m" } }),
+    );
+    const run = await f.manager.start("rq", {
+      prompt: "next",
+      session: "ses_existing",
+      variant: "low",
+    });
+    expect(f.context.session.create).not.toHaveBeenCalled();
+    expect(f.context.session.switchModel).toHaveBeenCalledWith(
+      {
+        sessionID: "ses_existing",
+        model: { providerID: "p", id: "m", variant: "low" },
+      },
+      expect.anything(),
+    );
+    f.complete("ses_existing");
+    await run.done;
+  });
+
+  it("reports startup failures and rejects variants without any model", async () => {
+    const f = fixture();
+    await expect(
+      f.manager.start("rq", { prompt: "test", variant: "high" }),
+    ).rejects.toThrow("before selecting a model");
+    expect(f.report).toHaveBeenCalledWith(
+      expect.objectContaining({
+        error: expect.stringContaining("before selecting"),
+      }),
+    );
+    await expect(
+      f.manager.start("missing", { prompt: "test", session: "ses_missing" }),
+    ).rejects.toThrow("Session not found");
+  });
+
+  it("rejects a different location and simultaneous managed use of a session", async () => {
+    const f = fixture();
+    f.sessions.set(
+      "ses_other",
+      sessionInfo("ses_other", { location: { directory: "/other" } }),
+    );
+    await expect(
+      f.manager.start("other", { prompt: "test", session: "ses_other" }),
+    ).rejects.toThrow("different RPC location");
+    f.sessions.set("ses_one", sessionInfo("ses_one"));
+    const run = await f.manager.start("one", {
+      prompt: "test",
+      session: "ses_one",
+    });
+    await expect(
+      f.manager.start("two", { prompt: "test", session: "ses_one" }),
+    ).rejects.toThrow("already has a managed run");
+    expect(f.context.session.interrupt).not.toHaveBeenCalled();
+    f.complete("ses_one");
+    await run.done;
   });
 });
 
-describe("RunManager failure and shutdown", () => {
-  it("reports spawn errors and missing pids before accepting a run", async () => {
-    const logger = {
-      info: async () => {},
-      warn: async () => {},
-      error: async () => {},
-    };
-    const errored = new FakeChild();
-    const errorManager = new RunManager({
-      logger,
-      shutdownGraceMs: 5,
-      spawn: () => {
-        queueMicrotask(() => errored.emit("error", new Error("ENOENT")));
-        return errored;
-      },
-    });
-
-    await expect(
-      errorManager.start({
-        attach: {},
-        argv: ["/missing"],
-        requestId: "rq_1",
-        timeoutMs: 1,
-      }),
-    ).rejects.toThrow("ENOENT");
-
-    const missingPid = new FakeChild(null);
-    const pidManager = new RunManager({
-      logger,
-      shutdownGraceMs: 5,
-      spawn: () => {
-        queueMicrotask(() => missingPid.emit("spawn"));
-        return missingPid;
-      },
-    });
-    await expect(
-      pidManager.start({
-        attach: {},
-        argv: ["/bin/opencode"],
-        requestId: "rq_2",
-        timeoutMs: 1,
-      }),
-    ).rejects.toThrow("pid");
-  });
-
-  it("kills all active process groups on shutdown", async () => {
-    vi.useFakeTimers();
-    const child = new FakeChild();
-    const signals: string[] = [];
-    const manager = new RunManager({
-      killProcessGroup: (_pid, signal) => {
-        signals.push(signal);
-        return true;
-      },
-      logger: {
-        info: async () => {},
-        warn: async () => {},
-        error: async () => {},
-      },
-      shutdownGraceMs: 5,
-      spawn: () => {
-        queueMicrotask(() => child.emit("spawn"));
-        return child;
-      },
-    });
-
-    await manager.start({
-      attach: {},
-      argv: ["/bin/opencode"],
-      requestId: "rq_1",
-      timeoutMs: 1000,
-    });
-    const killed = manager.killAll();
-    expect(signals).toEqual(["SIGTERM"]);
-    await vi.advanceTimersByTimeAsync(5);
-    await killed;
-    expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
-    child.emit("exit", null, "SIGKILL");
-    vi.useRealTimers();
-  });
-
-  it("returns immediately when shutdown has no active runs", async () => {
-    const manager = new RunManager({
-      killProcessGroup: () => {
-        throw new Error("should not kill");
-      },
-      logger: {
-        info: async () => {},
-        warn: async () => {},
-        error: async () => {},
-      },
-      shutdownGraceMs: 5,
-    });
-
-    await expect(manager.killAll()).resolves.toBeUndefined();
-  });
-
-  it("parses lowercase sessionId event fields", async () => {
-    const child = new FakeChild();
-    const logs: string[] = [];
-    const manager = new RunManager({
-      killProcessGroup: () => true,
-      logger: {
-        error: async () => {},
-        info: async (_message, fields) => {
-          logs.push(String(fields?.sessionId));
-        },
-        warn: async () => {},
-      },
-      shutdownGraceMs: 5,
-      spawn: () => {
-        queueMicrotask(() => child.emit("spawn"));
-        return child;
-      },
-    });
-
-    const run = await manager.start({
-      attach: {},
-      argv: ["/bin/opencode"],
-      requestId: "rq_1",
-      timeoutMs: 1000,
-    });
-    child.stdout.write(`${JSON.stringify({ sessionId: "ses_lower" })}\n`);
-    child.emit("exit", 0, null);
+describe("native run lifecycle", () => {
+  it.each([
+    "failed",
+    "interrupted",
+  ] as const)("counts a %s session as failure", async (outcome) => {
+    const f = fixture();
+    const run = await f.manager.start("rq", { prompt: "test" });
+    f.complete("ses_1", outcome);
     await run.done;
-
-    expect(logs).toEqual(["ses_lower"]);
+    expect(f.report).toHaveBeenCalledWith(
+      expect.objectContaining({ error: `Session ${outcome}` }),
+    );
   });
 
-  it("handles ESRCH when killing a process group", () => {
-    const original = vi.spyOn(process, "kill").mockImplementation(() => {
-      const error = new Error("gone");
-      Object.defineProperty(error, "code", { value: "ESRCH" });
-      throw error;
+  it("times out active runs by interrupting the actual session", async () => {
+    vi.useFakeTimers();
+    const f = fixture({ runTimeoutMs: 5000 });
+    const run = await f.manager.start("rq", { prompt: "test", timeoutMs: 10 });
+    await vi.advanceTimersByTimeAsync(11);
+    await run.done;
+    expect(f.context.session.interrupt).toHaveBeenCalledWith({
+      sessionID: "ses_1",
+      continue: false,
     });
-
-    expect(killProcessGroup(123, "SIGTERM")).toBe(false);
-    original.mockRestore();
+    expect(f.report).toHaveBeenCalledWith(
+      expect.objectContaining({ error: "Run timed out" }),
+    );
   });
 
-  it("rethrows unexpected process-group kill errors", () => {
-    const original = vi.spyOn(process, "kill").mockImplementation(() => {
-      const error = new Error("denied");
-      Object.defineProperty(error, "code", { value: "EPERM" });
-      throw error;
+  it("shuts down runs, rejects new work and cleans up late session creation", async () => {
+    const f = fixture();
+    const created = Promise.withResolvers<ReturnType<typeof sessionInfo>>();
+    f.context.session.create.mockReturnValueOnce(created.promise);
+    const start = f.manager.start("rq", { prompt: "test" });
+    const rejected = expect(start).rejects.toThrow("Plugin unloaded");
+    const stopped = f.manager.dispose();
+    created.resolve(sessionInfo("ses_late"));
+    await rejected;
+    await stopped;
+    expect(f.context.session.prompt).not.toHaveBeenCalled();
+    expect(f.context.session.interrupt).toHaveBeenCalledWith({
+      sessionID: "ses_late",
+      continue: false,
     });
+    await expect(f.manager.start("later", { prompt: "test" })).rejects.toThrow(
+      "shutting down",
+    );
+  });
 
-    expect(() => killProcessGroup(123, "SIGTERM")).toThrow("denied");
-    original.mockRestore();
+  it("finds managed roots for descendant sessions but leaves unrelated sessions alone", async () => {
+    const f = fixture();
+    expect(await f.manager.owner("ses_missing")).toBeUndefined();
+    const run = await f.manager.start("rq", { prompt: "test" });
+    f.sessions.set(
+      "ses_child",
+      sessionInfo("ses_child", { parentID: "ses_1" }),
+    );
+    f.sessions.set("ses_unrelated", sessionInfo("ses_unrelated"));
+    f.sessions.set(
+      "ses_cycle",
+      sessionInfo("ses_cycle", { parentID: "ses_cycle" }),
+    );
+    expect((await f.manager.owner("ses_child"))?.requestId).toBe("rq");
+    expect(await f.manager.owner("ses_unrelated")).toBeUndefined();
+    expect(await f.manager.owner("ses_cycle")).toBeUndefined();
+    f.complete();
+    await run.done;
+  });
+
+  it("preserves workspace placement and cancels a run only once", async () => {
+    const f = fixture();
+    Object.assign(f.context.location, { workspaceID: "wrk_test" });
+    const run = await f.manager.start("rq", { prompt: "test" });
+    expect(f.context.session.create).toHaveBeenCalledWith({
+      location: { directory: "/project", workspaceID: "wrk_test" },
+    });
+    const owned = await f.manager.owner("ses_1");
+    expect(owned).toBeDefined();
+    if (owned === undefined) throw new Error("Managed run missing");
+    f.manager.cancel(owned, "First cancellation");
+    f.manager.cancel(owned, "Second cancellation");
+    await run.done;
+    expect(f.report).toHaveBeenCalledWith(
+      expect.objectContaining({ error: "First cancellation" }),
+    );
+    expect(f.context.session.interrupt).toHaveBeenCalledTimes(1);
+  });
+
+  it("normalizes non-Error admission failures", async () => {
+    const f = fixture();
+    f.context.session.prompt.mockRejectedValueOnce("rejected");
+    await expect(f.manager.start("rq", { prompt: "test" })).rejects.toBe(
+      "rejected",
+    );
+    expect(f.report).toHaveBeenCalledWith(
+      expect.objectContaining({ error: "rejected" }),
+    );
   });
 });
