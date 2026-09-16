@@ -30,29 +30,19 @@ export const selectSession = async (
         options,
       );
       selected = page.data.find(
-        (session) =>
-          session.location.directory === location.directory &&
-          session.location.workspaceID === location.workspaceID,
+        (session) => session.location.directory === location.directory,
       );
       cursor = page.cursor.next ?? undefined;
     } while (selected === undefined && cursor !== undefined);
   }
+  // Omitting `before` forks the whole session, matching the previous
+  // unconditional `{ type: "through" }` boundary.
   if (selected !== undefined && request.fork)
-    return client.session.fork(
-      { sessionID: selected.id, boundary: { type: "through" } },
-      options,
-    );
+    return client.session.fork({ sessionID: selected.id }, options);
   return (
     selected ??
     client.session.create(
-      {
-        location: {
-          directory: location.directory,
-          ...(location.workspaceID === undefined
-            ? {}
-            : { workspaceID: location.workspaceID }),
-        },
-      },
+      { location: { directory: location.directory } },
       options,
     )
   );

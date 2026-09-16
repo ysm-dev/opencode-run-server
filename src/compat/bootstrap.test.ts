@@ -213,8 +213,8 @@ it("wires authenticated backend transport and legacy requests with loopback defa
   });
   expect(response.status).toBe(202);
   expect(mocks.start).toHaveBeenCalled();
-  // The actual configured transport reaches this test listener; /api/health is intentionally absent.
-  await expect(mocks.clients[0]?.health.get()).rejects.toBeDefined();
+  // The actual configured transport reaches this test listener; /api/status is intentionally absent.
+  await expect(mocks.clients[0]?.server.status()).rejects.toBeDefined();
   mocks.unavailable[0]?.();
   await cleanup();
 });

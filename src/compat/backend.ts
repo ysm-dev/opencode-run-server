@@ -87,16 +87,11 @@ export class LegacyBackend {
             );
           },
         },
-        catalog: {
-          model: {
-            default: () =>
-              this.client.model.default({
-                location: {
-                  directory: selected.location.directory,
-                  workspace: selected.location.workspaceID,
-                },
-              }),
-          },
+        model: {
+          default: () =>
+            this.client.model.default({
+              location: { directory: selected.location.directory },
+            }),
         },
       },
       this.config,
@@ -209,7 +204,7 @@ export class LegacyBackend {
       await this.client.permission.reply({
         sessionID: event.data.sessionID,
         requestID: event.data.id,
-        reply: allow ? "once" : "reject",
+        decision: allow ? "once" : "reject",
       });
       if (!allow)
         manager.cancel(
@@ -225,7 +220,7 @@ export class LegacyBackend {
       for (const manager of this.#managers) {
         const run = await manager.owner(event.data.form.sessionID);
         if (run === undefined) continue;
-        await this.client.form.cancel({
+        await this.client.session.form.cancel({
           sessionID: event.data.form.sessionID,
           formID: event.data.form.id,
         });

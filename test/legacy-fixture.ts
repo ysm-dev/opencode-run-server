@@ -73,7 +73,9 @@ export const legacyFixture = (options: object = {}) => {
     async () => [],
   );
   const reply = vi.fn<OpenCodeClient["permission"]["reply"]>(async () => {});
-  const cancelForm = vi.fn<OpenCodeClient["form"]["cancel"]>(async () => {});
+  const cancelForm = vi.fn<OpenCodeClient["session"]["form"]["cancel"]>(
+    async () => {},
+  );
   const client: OpenCodeClient = {
     ...native,
     session: {
@@ -83,8 +85,9 @@ export const legacyFixture = (options: object = {}) => {
       fork,
       context,
       inbox: { ...native.session.inbox, list: inbox },
+      form: { ...native.session.form, cancel: cancelForm },
     },
-    model: { ...native.model, default: f.context.catalog.model.default },
+    model: { ...native.model, default: f.context.model.default },
     location: {
       ...native.location,
       get: vi.fn(async (input) => ({
@@ -97,7 +100,6 @@ export const legacyFixture = (options: object = {}) => {
       })),
     },
     permission: { ...native.permission, reply },
-    form: { ...native.form, cancel: cancelForm },
     event: {
       subscribe: ({ signal } = {}) => {
         const stream = subscriptions++ === 0 ? current() : open();

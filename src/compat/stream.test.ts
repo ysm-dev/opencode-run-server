@@ -41,7 +41,7 @@ it("reconnects a dropped stream and resyncs admissions for active runs", async (
     {
       id: "msg_queued",
       type: "user",
-      timeCreated: 0,
+      time: { created: 0 },
       sessionID: "ses_1",
       payload: { text: "test" },
       delivery: "steer",

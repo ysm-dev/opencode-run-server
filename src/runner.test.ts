@@ -51,7 +51,7 @@ describe("native session runs", () => {
       { sessionID: "ses_1", agent: "build" },
       expect.anything(),
     );
-    expect(f.context.session.rename).toHaveBeenCalledWith(
+    expect(f.context.session.update).toHaveBeenCalledWith(
       { sessionID: "ses_1", title: "Review" },
       expect.anything(),
     );
@@ -78,7 +78,7 @@ describe("native session runs", () => {
     expect(f.context.session.command).toHaveBeenCalledWith(
       {
         sessionID: "ses_1",
-        command: "review",
+        name: "review",
         text: "",
         files: [],
         delivery: "steer",
@@ -173,7 +173,7 @@ describe("native run lifecycle", () => {
     await run.done;
     expect(f.context.session.interrupt).toHaveBeenCalledWith({
       sessionID: "ses_1",
-      continue: false,
+      resume: false,
     });
     expect(f.report).toHaveBeenCalledWith(
       expect.objectContaining({ error: "Run timed out" }),
@@ -193,7 +193,7 @@ describe("native run lifecycle", () => {
     expect(f.context.session.prompt).not.toHaveBeenCalled();
     expect(f.context.session.interrupt).toHaveBeenCalledWith({
       sessionID: "ses_late",
-      continue: false,
+      resume: false,
     });
     await expect(f.manager.start("later", { prompt: "test" })).rejects.toThrow(
       "shutting down",
@@ -220,12 +220,14 @@ describe("native run lifecycle", () => {
     await run.done;
   });
 
-  it("preserves workspace placement and cancels a run only once", async () => {
+  it("omits workspace from session creation and cancels a run only once", async () => {
     const f = fixture();
+    // Session creation is directory-scoped only; a configured workspaceID must
+    // not be forwarded even though it is still available for status reporting.
     Object.assign(f.context.location, { workspaceID: "wrk_test" });
     const run = await f.manager.start("rq", { prompt: "test" });
     expect(f.context.session.create).toHaveBeenCalledWith({
-      location: { directory: "/project", workspaceID: "wrk_test" },
+      location: { directory: "/project" },
     });
     const owned = await f.manager.owner("ses_1");
     expect(owned).toBeDefined();

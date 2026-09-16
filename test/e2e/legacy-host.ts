@@ -2,6 +2,26 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { OpenCode } from "@opencode/client";
 import { z } from "zod";
+import { RunServer } from "../../src/rpc.js";
+
+// plugin.awaitActivation was removed in v2.0.4; the plugin's own status RPC
+// only answers once its setup() has run, so it doubles as a readiness probe.
+const readyByRpc = async (
+  client: ReturnType<typeof OpenCode.make>,
+  directory: string,
+  deadline = Date.now() + 10_000,
+) => {
+  const rpc = client.rpc(RunServer);
+  while (true) {
+    try {
+      await rpc.status(undefined, { location: { directory } });
+      return;
+    } catch (error) {
+      if (Date.now() > deadline) throw error;
+      await Bun.sleep(20);
+    }
+  }
+};
 
 const bodySchema = z
   .object({ messages: z.array(z.object({ role: z.string() }).passthrough()) })
@@ -148,7 +168,7 @@ export const createLegacyHost = async (
     port: 0,
     fetch: async (request) => {
       // Stalls only transport probes, leaving run traffic answerable.
-      if (new URL(request.url).pathname === "/api/health")
+      if (new URL(request.url).pathname === "/api/status")
         await health?.promise;
       return z.instanceof(Response).parse(await handler(request));
     },
@@ -173,7 +193,7 @@ export const createLegacyHost = async (
       authorization: `Basic ${Buffer.from("opencode:service-secret").toString("base64")}`,
     },
   });
-  await client.plugin.awaitActivation({ location: { directory } });
+  await readyByRpc(client, directory);
   return {
     client,
     directory,

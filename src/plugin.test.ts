@@ -102,7 +102,7 @@ it("accounts for TTL expiry and unload drops and interrupts active runs", async 
   });
   expect(f.context.session.interrupt).toHaveBeenCalledWith({
     sessionID: "ses_1",
-    continue: false,
+    resume: false,
   });
 });
 

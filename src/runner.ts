@@ -13,13 +13,13 @@ export type RunContext = {
     | "get"
     | "switchAgent"
     | "switchModel"
-    | "rename"
+    | "update"
     | "prompt"
     | "command"
     | "wait"
     | "interrupt"
   >;
-  catalog: { model: Pick<Plugin.Context["catalog"]["model"], "default"> };
+  model: Pick<Plugin.Context["model"], "default">;
 };
 
 type Run = {
@@ -138,7 +138,7 @@ export class RunManager {
     if (run.sessionID !== undefined) {
       run.interruption = this.context.session.interrupt({
         sessionID: run.sessionID,
-        continue: false,
+        resume: false,
       });
       void run.interruption.catch(() => {});
     }
@@ -196,7 +196,7 @@ export class RunManager {
       };
       if (run.request.command !== undefined) {
         await this.context.session.command(
-          { ...prompt, command: run.request.command },
+          { ...prompt, name: run.request.command },
           { signal },
         );
       } else {
@@ -230,7 +230,7 @@ export class RunManager {
         await (run.interruption ??
           this.context.session.interrupt({
             sessionID: run.sessionID,
-            continue: false,
+            resume: false,
           }));
       }
     }
@@ -241,21 +241,15 @@ export class RunManager {
       run.request.session === undefined
         ? // Creation is allowed to finish so cleanup can interrupt the returned ID.
           await this.context.session.create({
-            location: {
-              directory: this.context.location.directory,
-              ...(this.context.location.workspaceID === undefined
-                ? {}
-                : { workspaceID: this.context.location.workspaceID }),
-            },
+            // Session locations are directory-scoped only; workspaces no longer
+            // participate in session creation or ownership checks.
+            location: { directory: this.context.location.directory },
           })
         : await this.context.session.get(
             { sessionID: run.request.session },
             { signal: run.controller.signal },
           );
-    if (
-      session.location.directory !== this.context.location.directory ||
-      session.location.workspaceID !== this.context.location.workspaceID
-    ) {
+    if (session.location.directory !== this.context.location.directory) {
       throw new Error("Session belongs to a different RPC location");
     }
     if (

@@ -10,6 +10,25 @@ const statusSchema = z.object({
   runs: z.object({ active: z.number(), queued: z.number(), total: z.number() }),
 });
 
+// plugin.awaitActivation was removed in v2.0.4; the plugin's own status RPC
+// only answers once its setup() has run, so it doubles as a readiness probe.
+const readyByRpc = async (
+  client: ReturnType<typeof OpenCode.make>,
+  directory: string,
+  deadline = Date.now() + 10_000,
+) => {
+  const rpc = client.rpc(RunServer);
+  while (true) {
+    try {
+      await rpc.status(undefined, { location: { directory } });
+      return;
+    } catch (error) {
+      if (Date.now() > deadline) throw error;
+      await Bun.sleep(20);
+    }
+  }
+};
+
 const chunk = (delta: object, reason: string | null) => ({
   id: "evict",
   object: "chat.completion.chunk",
@@ -139,7 +158,9 @@ const host = async (root: string, installed: string) => {
       authorization: `Basic ${Buffer.from("opencode:service-secret").toString("base64")}`,
     },
   });
-  await client.plugin.awaitActivation({ location: { directory } });
+  // plugin.awaitActivation was removed; poll the plugin's own RPC method
+  // instead, which only answers once its setup() has registered it.
+  await readyByRpc(client, directory);
   return {
     client,
     directory,

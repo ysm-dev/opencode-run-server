@@ -37,7 +37,10 @@ export const discoverHost = async (
       .pipe(registration)
       .safeParse(raw);
     if (!record.success || record.data.pid !== pid) continue;
-    const endpoint = await probe({ file });
+    // A probe version mismatched against the host (for example an SDK built
+    // against a removed health endpoint) must degrade to "not discovered yet"
+    // rather than crash the supervisor's startup loop.
+    const endpoint = await probe({ file }).catch(() => undefined);
     if (endpoint !== undefined && endpoint.url === record.data.url)
       return {
         url: endpoint.url,

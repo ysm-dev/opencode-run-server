@@ -42,7 +42,7 @@ export const runFixture = () => {
     }),
     switchAgent: vi.fn<RunContext["session"]["switchAgent"]>(async () => {}),
     switchModel: vi.fn<RunContext["session"]["switchModel"]>(async () => {}),
-    rename: vi.fn<RunContext["session"]["rename"]>(async () => {}),
+    update: vi.fn<RunContext["session"]["update"]>(async () => {}),
     prompt: vi.fn<RunContext["session"]["prompt"]>(async (input) => {
       const id = input.id ?? "msg_1";
       waits.set(input.sessionID, Promise.withResolvers<void>());
@@ -50,7 +50,7 @@ export const runFixture = () => {
       return {
         id,
         sessionID: input.sessionID,
-        timeCreated: 0,
+        time: { created: 0 },
         type: "user",
         payload: { text: input.text },
         delivery: "steer",
@@ -76,23 +76,21 @@ export const runFixture = () => {
       interrupted: true,
     })),
   };
-  const catalog = {
-    model: {
-      default: vi.fn<RunContext["catalog"]["model"]["default"]>(async () => ({
-        location: {
-          ...location,
-          project: {
-            id: "project",
-            directory: "/project",
-            canonical: "/project",
-          },
+  const model = {
+    default: vi.fn<RunContext["model"]["default"]>(async () => ({
+      location: {
+        ...location,
+        project: {
+          id: "project",
+          directory: "/project",
+          canonical: "/project",
         },
-        data: null,
-      })),
-    },
+      },
+      data: null,
+    })),
   };
   return {
-    context: { location, session, catalog },
+    context: { location, session, model },
     sessions,
     admissions,
     waits,

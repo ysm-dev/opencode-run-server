@@ -41,7 +41,7 @@ OpenCode v2 normalizes that configuration. Its current spelling also works:
 }
 ```
 
-The plugin targets `@opencode/plugin@2.0.3`. Configure it globally to make it
+The plugin targets `@opencode/plugin@2.0.4`. Configure it globally to make it
 available across projects. For a local checkout, run `bun install` and
 `bun run build`, then use its absolute **directory** path as `package`.
 

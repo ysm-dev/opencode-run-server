@@ -143,7 +143,7 @@ it("interrupts again if durable admission finishes after cancellation", async ()
   response.resolve({
     id: "msg_late",
     sessionID: "ses_1",
-    timeCreated: 0,
+    time: { created: 0 },
     type: "user",
     payload: { text: "test" },
     delivery: "steer",

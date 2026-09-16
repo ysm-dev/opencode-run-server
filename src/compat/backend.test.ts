@@ -79,7 +79,7 @@ it("preserves explicit, continue, pagination, and fork selection", async () => {
   );
   expect(fork.parentID).toBe("ses_existing");
   expect(f.fork).toHaveBeenCalledWith(
-    { sessionID: "ses_existing", boundary: { type: "through" } },
+    { sessionID: "ses_existing" },
     { signal },
   );
   f.list.mockResolvedValue({ data: [], cursor: {} });
@@ -140,7 +140,7 @@ it("rejects permission asks by default and supports per-request auto-approval", 
   expect(f.reply).toHaveBeenCalledWith({
     sessionID: "ses_2",
     requestID: "per_1",
-    reply: "reject",
+    decision: "reject",
   });
   const allowed = await f.backend.start("auto", {
     dir: "/project",
@@ -150,7 +150,7 @@ it("rejects permission asks by default and supports per-request auto-approval", 
   asked("ses_3");
   await vi.waitFor(() =>
     expect(f.reply).toHaveBeenLastCalledWith(
-      expect.objectContaining({ reply: "once" }),
+      expect.objectContaining({ decision: "once" }),
     ),
   );
   f.complete("ses_3");
@@ -192,7 +192,7 @@ it("reconciles command admissions from native inbox and projected history", asyn
     {
       id: "msg_new",
       type: "user",
-      timeCreated: 0,
+      time: { created: 0 },
       sessionID: "ses_1",
       payload: { text: "test" },
       delivery: "steer",
@@ -200,7 +200,7 @@ it("reconciles command admissions from native inbox and projected history", asyn
     {
       id: "msg_synthetic",
       type: "synthetic",
-      timeCreated: 0,
+      time: { created: 0 },
       sessionID: "ses_1",
       payload: { text: "test" },
       delivery: "steer",
@@ -213,7 +213,7 @@ it("reconciles command admissions from native inbox and projected history", asyn
   });
   await vi.waitFor(() => expect(f.context.session.wait).toHaveBeenCalled());
   expect(f.context.session.command).toHaveBeenCalledWith(
-    expect.objectContaining({ command: "review", text: "args" }),
+    expect.objectContaining({ name: "review", text: "args" }),
     expect.anything(),
   );
   f.complete();
@@ -233,7 +233,7 @@ it("resolves a variant against the requested location's default model", async ()
   await expect(
     f.backend.start("rq", { dir: "/project", prompt: "test", variant: "high" }),
   ).rejects.toThrow("before selecting a model");
-  expect(f.context.catalog.model.default).toHaveBeenCalledWith({
-    location: { directory: "/project", workspace: undefined },
+  expect(f.context.model.default).toHaveBeenCalledWith({
+    location: { directory: "/project" },
   });
 });

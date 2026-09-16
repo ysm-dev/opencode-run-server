@@ -15,7 +15,7 @@ export const configureSession = async (
     request.model !== undefined
       ? modelRef(request.model, request.variant)
       : request.variant !== undefined
-        ? (current ?? (await context.catalog.model.default()).data ?? undefined)
+        ? (current ?? (await context.model.default()).data ?? undefined)
         : undefined;
   if (request.variant !== undefined && selected === undefined) {
     throw new Error("Cannot select a variant before selecting a model");
@@ -40,7 +40,7 @@ export const configureSession = async (
       { signal },
     );
   if (request.title !== undefined)
-    await context.session.rename(
+    await context.session.update(
       { sessionID, title: request.title },
       { signal },
     );
