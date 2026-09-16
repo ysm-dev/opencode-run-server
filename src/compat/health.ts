@@ -1,15 +1,48 @@
 import type { Config } from "../config.js";
 
+/**
+ * `ok` and `slow` both prove the service is present; only `down` is a transport
+ * loss, and `gone` means the process that owns the listener has exited.
+ */
+export type HealthStatus = "ok" | "slow" | "down" | "gone";
+
+const interrupted = (error: unknown) => {
+  const name =
+    typeof error === "object" && error !== null && "name" in error
+      ? String(error.name)
+      : "";
+  return name === "TimeoutError" || name === "AbortError";
+};
+
 export const checkHealth = async (
   url: string,
   timeoutMs: number,
   fetcher: typeof fetch = fetch,
-) => {
+): Promise<HealthStatus> => {
   try {
     await fetcher(new URL("/api/health", url), {
       signal: AbortSignal.timeout(timeoutMs),
     });
-    return true;
+    return "ok";
+  } catch (error) {
+    // A busy service answers late; that is not a reason to stop serving runs.
+    return interrupted(error) ? "slow" : "down";
+  }
+};
+
+/** Confirms a recorded listener still owns its address, not just its pid. */
+export const checkListener = async (
+  bind: string,
+  port: number,
+  timeoutMs: number,
+  fetcher: typeof fetch = fetch,
+) => {
+  const host = bind.includes(":") ? `[${bind}]` : bind;
+  try {
+    const response = await fetcher(`http://${host}:${port}/health`, {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    return response.ok;
   } catch {
     return false;
   }
@@ -18,13 +51,18 @@ export const checkHealth = async (
 export class HealthMonitor {
   #stopped = true;
   #failures = 0;
+  #unavailable = false;
   #timer: ReturnType<typeof setTimeout> | undefined;
   #snapshot = { healthy: true, lastCheckAt: Date.now() };
   constructor(
     readonly url: string,
     readonly config: Config["healthCheck"],
-    readonly unhealthy: () => void,
-    readonly check = checkHealth,
+    readonly gone: () => void,
+    readonly check: (
+      url: string,
+      timeoutMs: number,
+    ) => Promise<HealthStatus> = checkHealth,
+    readonly report: (message: string) => void = () => {},
   ) {}
   snapshot = () => this.#snapshot;
   start() {
@@ -37,14 +75,25 @@ export class HealthMonitor {
     clearTimeout(this.#timer);
   }
   private async tick() {
-    const healthy = await this.check(this.url, this.config.timeoutMs);
+    const status = await this.check(this.url, this.config.timeoutMs);
     if (this.#stopped) return;
-    this.#snapshot = { healthy, lastCheckAt: Date.now() };
-    this.#failures = healthy ? 0 : this.#failures + 1;
-    if (this.#failures >= this.config.failureThreshold) {
+    this.#snapshot = { healthy: status !== "down", lastCheckAt: Date.now() };
+    if (status === "gone") {
       this.#stopped = true;
-      this.unhealthy();
+      this.report("owning opencode process exited");
+      this.gone();
       return;
+    }
+    if (status === "down") this.#failures += 1;
+    if (status === "ok") this.#failures = 0;
+    if (!this.#unavailable && this.#failures >= this.config.failureThreshold) {
+      this.#unavailable = true;
+      this.report("backend transport unavailable; still accepting requests");
+    }
+    if (this.#unavailable && status === "ok") {
+      this.#unavailable = false;
+      this.#failures = 0;
+      this.report("backend transport recovered");
     }
     this.#timer = setTimeout(() => {
       void this.tick();

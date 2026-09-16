@@ -30,7 +30,7 @@ it("exposes a v2 definition and location-scoped RPC with queue backpressure", as
     data: { retryAfterSeconds: 1 },
   });
   expect(await f.status()).toMatchObject({
-    version: "0.2.0",
+    version: "0.3.0",
     location: { directory: "/project" },
     runs: { active: 1, queued: 1, total: 2 },
   });
@@ -230,7 +230,7 @@ it("tracks prompts admitted by a native command through the prompt hook", async 
 });
 
 it("starts and releases the legacy listener when compatibility is enabled", async () => {
-  const compatibility = await import("./compat/supervisor.js");
+  const compatibility = await import("./compat/listener.js");
   const released = vi.fn(async () => {});
   const acquire = vi
     .spyOn(compatibility, "acquireCompatibility")

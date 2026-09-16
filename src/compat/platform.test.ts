@@ -1,7 +1,12 @@
 import type { networkInterfaces } from "node:os";
 import { afterEach, expect, it, vi } from "vitest";
 import { parseOptions } from "../config.js";
-import { checkHealth, HealthMonitor } from "./health.js";
+import {
+  checkHealth,
+  checkListener,
+  HealthMonitor,
+  type HealthStatus,
+} from "./health.js";
 import { discoverBind, tailscaleIP } from "./network.js";
 import { childEntry, resolveRuntime } from "./runtime.js";
 
@@ -76,48 +81,106 @@ it("selects Bun or Node runtimes and built companion entrypoints", async () => {
   );
 });
 
-it("treats any HTTP response as alive, but transport failures as unhealthy", async () => {
+it("separates responses, slow answers, and transport loss", async () => {
   const fetcher = vi
     .fn<typeof fetch>()
     .mockResolvedValue(new Response(null, { status: 401 }));
-  expect(await checkHealth("http://host", 100, fetcher)).toBe(true);
+  expect(await checkHealth("http://host", 100, fetcher)).toBe("ok");
   fetcher.mockRejectedValueOnce(new Error("disconnected"));
-  expect(await checkHealth("http://host", 100, fetcher)).toBe(false);
+  expect(await checkHealth("http://host", 100, fetcher)).toBe("down");
+  fetcher.mockRejectedValueOnce(
+    Object.assign(new Error("timed out"), { name: "TimeoutError" }),
+  );
+  expect(await checkHealth("http://host", 100, fetcher)).toBe("slow");
+  fetcher.mockRejectedValueOnce("transport string");
+  expect(await checkHealth("http://host", 100, fetcher)).toBe("down");
+  fetcher.mockImplementationOnce((_input, init) =>
+    fetch("http://127.0.0.1:1", { signal: init?.signal ?? null }),
+  );
+  expect(await checkHealth("http://host", 1, fetcher)).not.toBe("ok");
 });
 
-it("polls health with consecutive-failure thresholds and cancels stale checks", async () => {
+it("confirms a recorded listener still answers on its own address", async () => {
+  const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response("ok"));
+  expect(await checkListener("127.0.0.1", 4097, 100, fetcher)).toBe(true);
+  expect(fetcher).toHaveBeenCalledWith(
+    "http://127.0.0.1:4097/health",
+    expect.objectContaining({ signal: expect.anything() }),
+  );
+  await checkListener("::1", 4097, 100, fetcher);
+  expect(fetcher).toHaveBeenLastCalledWith(
+    "http://[::1]:4097/health",
+    expect.anything(),
+  );
+  fetcher.mockResolvedValueOnce(new Response(null, { status: 500 }));
+  expect(await checkListener("127.0.0.1", 4097, 100, fetcher)).toBe(false);
+  fetcher.mockRejectedValueOnce(new Error("refused"));
+  expect(await checkListener("127.0.0.1", 4097, 100, fetcher)).toBe(false);
+});
+
+it("keeps serving a busy or unreachable backend and stops only when its owner is gone", async () => {
   vi.useFakeTimers();
-  const unhealthy = vi.fn();
+  const gone = vi.fn();
+  const report = vi.fn();
   const check = vi
-    .fn()
-    .mockResolvedValueOnce(false)
-    .mockResolvedValueOnce(true)
-    .mockResolvedValue(false);
+    .fn<() => Promise<HealthStatus>>()
+    .mockResolvedValueOnce("down")
+    .mockResolvedValueOnce("slow")
+    .mockResolvedValueOnce("down")
+    .mockResolvedValueOnce("down")
+    .mockResolvedValueOnce("ok")
+    .mockResolvedValue("gone");
   const config = parseOptions({
     healthCheck: { intervalMs: 10, failureThreshold: 2 },
   });
   const monitor = new HealthMonitor(
     "http://host",
     config.healthCheck,
-    unhealthy,
+    gone,
     check,
+    report,
   );
   monitor.start();
   monitor.start();
-  await vi.advanceTimersByTimeAsync(31);
-  expect(unhealthy).toHaveBeenCalledOnce();
+  await vi.advanceTimersByTimeAsync(0);
   expect(monitor.snapshot().healthy).toBe(false);
+  await vi.advanceTimersByTimeAsync(11);
+  // A slow answer proves the service is present.
+  expect(monitor.snapshot().healthy).toBe(true);
+  expect(report).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(22);
+  expect(report).toHaveBeenCalledWith(
+    "backend transport unavailable; still accepting requests",
+  );
+  expect(gone).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(11);
+  expect(report).toHaveBeenCalledWith("backend transport recovered");
+  await vi.advanceTimersByTimeAsync(11);
+  expect(report).toHaveBeenCalledWith("owning opencode process exited");
+  expect(gone).toHaveBeenCalledOnce();
+  await vi.advanceTimersByTimeAsync(50);
+  expect(gone).toHaveBeenCalledOnce();
   monitor.stop();
-  const pending = Promise.withResolvers<boolean>();
+  const silent = vi.fn();
+  const defaults = new HealthMonitor(
+    "http://host",
+    config.healthCheck,
+    silent,
+    async () => "gone",
+  );
+  defaults.start();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(silent).toHaveBeenCalledOnce();
+  const pending = Promise.withResolvers<HealthStatus>();
   const stopped = new HealthMonitor(
     "http://host",
     config.healthCheck,
-    unhealthy,
+    gone,
     () => pending.promise,
   );
   stopped.start();
   stopped.stop();
-  pending.resolve(false);
+  pending.resolve("gone");
   await vi.advanceTimersByTimeAsync(100);
-  expect(unhealthy).toHaveBeenCalledOnce();
+  expect(gone).toHaveBeenCalledOnce();
 });

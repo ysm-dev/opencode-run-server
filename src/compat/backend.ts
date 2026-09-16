@@ -6,11 +6,12 @@ import { runRequestSchema } from "../request.js";
 import { type PluginEvent, RunManager } from "../runner.js";
 import type { LegacyRequest } from "./request.js";
 import { selectSession } from "./selection.js";
+import { EventStream } from "./stream.js";
 
 export class LegacyBackend {
   readonly #managers = new Set<RunManager>();
   readonly #controller = new AbortController();
-  #events: Promise<void> | undefined;
+  #stream: EventStream | undefined;
   constructor(
     readonly client: OpenCodeClient,
     readonly config: Config,
@@ -19,34 +20,16 @@ export class LegacyBackend {
   ) {}
 
   async connect() {
-    const iterator = this.client.event
-      .subscribe({ signal: this.#controller.signal })
-      [Symbol.asyncIterator]();
-    const connected = await iterator.next();
-    if (connected.done)
-      throw new Error("OpenCode event stream closed during startup");
-    this.#events = (async () => {
-      try {
-        while (!this.#controller.signal.aborted) {
-          const next = await iterator.next();
-          if (next.done) {
-            if (!this.#controller.signal.aborted)
-              throw new Error("OpenCode event stream closed");
-            break;
-          }
-          await this.observe(next.value);
-        }
-      } catch (error) {
-        if (!this.#controller.signal.aborted) {
-          await this.logger.error("OpenCode event stream failed", {
-            error: String(error),
-          });
-          this.unavailable();
-        }
-      } finally {
-        await iterator.return?.();
-      }
-    })();
+    this.#stream = new EventStream({
+      client: this.client,
+      restart: this.config.restart,
+      logger: this.logger,
+      signal: this.#controller.signal,
+      observe: (event) => this.observe(event),
+      resync: () => this.resync(),
+      unavailable: this.unavailable,
+    });
+    await this.#stream.connect();
   }
 
   async start(requestId: string, legacy: LegacyRequest) {
@@ -149,7 +132,29 @@ export class LegacyBackend {
   async dispose() {
     this.#controller.abort();
     await Promise.all([...this.#managers].map((manager) => manager.dispose()));
-    await this.#events;
+    await this.#stream?.done();
+  }
+
+  private async resync() {
+    for (const manager of this.#managers)
+      for (const sessionID of manager.sessions()) {
+        const pending = manager.pending(sessionID);
+        if (pending.length === 0) continue;
+        const queued = new Set(
+          (await this.client.session.inbox.list({ sessionID })).map(
+            (item) => item.id,
+          ),
+        );
+        for (const inboxID of pending)
+          if (!queued.has(inboxID))
+            manager.observe({
+              id: "evt_resynced",
+              type: "session.inbox.delivered",
+              created: Date.now(),
+              durable: { aggregateID: sessionID, seq: 0, version: 1 },
+              data: { sessionID, inboxID },
+            });
+      }
   }
 
   private async reconcileCommand(

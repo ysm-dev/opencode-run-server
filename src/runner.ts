@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import type { Plugin } from "@opencode/plugin";
 import { attachments } from "./attachments.js";
 import type { Config } from "./config.js";
-import { modelRef, type RunRequest } from "./request.js";
+import { configureSession } from "./configure.js";
+import type { RunRequest } from "./request.js";
 
 export type RunContext = {
   location: { directory: string; workspaceID?: string | undefined };
@@ -115,6 +116,17 @@ export class RunManager {
     }
   }
 
+  sessions() {
+    return [...this.#runs].flatMap((run) =>
+      run.sessionID === undefined ? [] : [run.sessionID],
+    );
+  }
+
+  pending(sessionID: string) {
+    const run = [...this.#runs].find((run) => run.sessionID === sessionID);
+    return run === undefined ? [] : [...run.admissions.keys()];
+  }
+
   cancel(run: Run, reason: string) {
     if (run.cancelled !== undefined) return;
     run.cancelled = reason;
@@ -168,7 +180,13 @@ export class RunManager {
     try {
       const session = await this.target(run);
       signal.throwIfAborted();
-      await this.configure(run, session.id, session.model);
+      await configureSession(
+        this.context,
+        run.request,
+        session.id,
+        session.model,
+        signal,
+      );
       signal.throwIfAborted();
       const prompt = {
         sessionID: session.id,
@@ -249,49 +267,5 @@ export class RunManager {
     }
     run.sessionID = session.id;
     return session;
-  }
-
-  private async configure(
-    run: Run,
-    sessionID: string,
-    current: Awaited<ReturnType<RunContext["session"]["get"]>>["model"],
-  ) {
-    const { signal } = run.controller;
-    const { request } = run;
-    const selected =
-      request.model !== undefined
-        ? modelRef(request.model, request.variant)
-        : request.variant !== undefined
-          ? (current ??
-            (await this.context.catalog.model.default()).data ??
-            undefined)
-          : undefined;
-    if (request.variant !== undefined && selected === undefined) {
-      throw new Error("Cannot select a variant before selecting a model");
-    }
-    if (selected !== undefined) {
-      await this.context.session.switchModel(
-        {
-          sessionID,
-          model: {
-            ...selected,
-            ...(request.variant === undefined
-              ? {}
-              : { variant: request.variant }),
-          },
-        },
-        { signal },
-      );
-    }
-    if (request.agent !== undefined)
-      await this.context.session.switchAgent(
-        { sessionID, agent: request.agent },
-        { signal },
-      );
-    if (request.title !== undefined)
-      await this.context.session.rename(
-        { sessionID, title: request.title },
-        { signal },
-      );
   }
 }

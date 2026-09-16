@@ -12,6 +12,7 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import pkg from "../../package.json" with { type: "json" };
 import { RunServer } from "../../src/rpc.js";
+import { verifyEviction } from "./eviction.js";
 import { installPublished } from "./install.js";
 import { verifyLegacy } from "./legacy.js";
 import { verify } from "./scenarios.js";
@@ -108,8 +109,9 @@ void queued; void id;
   await verify(root, installed);
   await verifyLegacy(root, installed, "node");
   await verifyLegacy(root, installed, "bun");
+  await verifyEviction(root, installed);
   console.log(
-    `Verified ${published ? "npm-published" : "locally packed"} ${pkg.name}@${pkg.version}: declarations, RPC, sessions, commands, attachments, permissions, queueing, timeout and unload.`,
+    `Verified ${published ? "npm-published" : "locally packed"} ${pkg.name}@${pkg.version}: declarations, RPC, sessions, commands, attachments, permissions, queueing, timeout, idle eviction and unload.`,
   );
 } finally {
   await rm(root, { recursive: true, force: true });

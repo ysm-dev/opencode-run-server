@@ -71,9 +71,10 @@ export const parseOptions = (raw: unknown): Config => {
   return result.data;
 };
 
-export const defaultLogFile = () =>
+export const stateDirectory = () =>
   join(
     process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"),
     "opencode-run-server",
-    "server.log",
   );
+
+export const defaultLogFile = () => join(stateDirectory(), "server.log");

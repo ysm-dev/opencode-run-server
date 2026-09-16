@@ -8,7 +8,7 @@ import { createLegacyHost } from "./legacy-host.js";
 const statsSchema = z.object({
   version: z.string(),
   opencodePath: z.string(),
-  mainServer: z.object({ url: z.string() }),
+  mainServer: z.object({ url: z.string(), healthy: z.boolean() }),
   runs: z.object({
     active: z.number(),
     queued: z.number(),
@@ -71,7 +71,7 @@ export const verifyLegacy = async (
     );
     assert.equal((await status()).opencodePath, "/legacy/opencode");
     assert.equal((await status()).mainServer.url, f.url);
-    assert.equal((await status()).version, "0.2.0");
+    assert.equal((await status()).version, "0.3.0");
     await verifySessions(f, post, idle);
 
     f.block();
@@ -141,6 +141,8 @@ export const verifyLegacy = async (
       await Bun.sleep(20);
     }
     assert.equal((await rpc.status(undefined, { location })).runs.completed, 1);
+    await verifyBusyBackend(f, post, idle, status);
+
     f.block();
     await post({ prompt: "Unload active" });
     await post({ prompt: "Discard pending" });
@@ -150,10 +152,41 @@ export const verifyLegacy = async (
   } finally {
     await f.close();
   }
-  await assert.rejects(fetch(`${f.base}/health`));
+  // The listener belongs to the host process, so it stops only once the
+  // service it attached to is gone for good.
+  const stopped = Date.now() + 10_000;
+  while (
+    await fetch(`${f.base}/health`).then(
+      () => true,
+      () => false,
+    )
+  ) {
+    assert.ok(Date.now() < stopped, "Legacy listener outlived its service");
+    await Bun.sleep(20);
+  }
   console.log(
     `Verified legacy HTTP/configuration on v2 with ${runtime} subprocess runtime.`,
   );
+};
+
+// A slow or briefly unreachable backend must not stop the listener or the runs
+// it already accepted; only a definitive loss of the owning process does.
+const verifyBusyBackend = async (
+  f: Awaited<ReturnType<typeof createLegacyHost>>,
+  post: (input: object) => Promise<Response>,
+  idle: () => Promise<unknown>,
+  status: () => Promise<z.infer<typeof statsSchema>>,
+) => {
+  const before = await status();
+  f.blockHealth();
+  // Outlast the configured probe timeout and failure threshold.
+  await Bun.sleep(1000);
+  assert.equal((await post({ prompt: "Busy backend" })).status, 202);
+  const after = (await idle()) as z.infer<typeof statsSchema>;
+  assert.equal(after.runs.total, before.runs.total + 1);
+  assert.equal(after.runs.failed, before.runs.failed);
+  assert.equal(after.mainServer.healthy, true);
+  f.releaseHealth();
 };
 
 const verifySessions = async (

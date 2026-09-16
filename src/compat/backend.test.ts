@@ -220,17 +220,6 @@ it("reconciles command admissions from native inbox and projected history", asyn
   await run.done;
 });
 
-it.each([
-  "closed",
-  "failed",
-])("signals unavailability if the event stream is %s", async (kind) => {
-  const f = await fixture();
-  if (kind === "closed") await f.events.return();
-  else f.events.fail(new Error("network failure"));
-  await vi.waitFor(() => expect(f.unavailable).toHaveBeenCalledOnce());
-  expect(f.logger.error).toHaveBeenCalled();
-});
-
 it("fails startup on an empty event stream", async () => {
   const f = legacyFixture();
   fixtures.push(f);

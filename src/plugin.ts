@@ -139,7 +139,7 @@ export const setup = async (ctx: SetupContext) => {
       }),
     });
     if (config.legacyHttp) {
-      const { acquireCompatibility } = await import("./compat/supervisor.js");
+      const { acquireCompatibility } = await import("./compat/listener.js");
       cleanupCompatibility = await acquireCompatibility(config, (message) =>
         log(message, {}, "info"),
       );

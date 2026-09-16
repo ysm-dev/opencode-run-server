@@ -7,9 +7,26 @@ import { Events } from "./plugin-fixture.js";
 
 export const legacyFixture = (options: object = {}) => {
   const f = runFixture();
-  const events = new Events();
-  events.push({ id: "evt_connected", type: "server.connected", data: {} });
+  // Reconnects subscribe again, so every subscription gets its own stream.
+  const streams: Events[] = [];
+  const transport = { offline: false };
+  const open = () => {
+    const stream = new Events();
+    streams.push(stream);
+    if (transport.offline) void stream.return();
+    else
+      stream.push({ id: "evt_connected", type: "server.connected", data: {} });
+    return stream;
+  };
+  const current = () => {
+    const stream = streams.at(-1);
+    if (stream === undefined) throw new Error("No event stream");
+    return stream;
+  };
+  let subscriptions = 0;
+  open();
   f.admissions.add((sessionID, inboxID) => {
+    const events = current();
     events.push({
       id: "evt_enqueue",
       type: "session.inbox.enqueued",
@@ -83,14 +100,15 @@ export const legacyFixture = (options: object = {}) => {
     form: { ...native.form, cancel: cancelForm },
     event: {
       subscribe: ({ signal } = {}) => {
+        const stream = subscriptions++ === 0 ? current() : open();
         signal?.addEventListener(
           "abort",
           () => {
-            void events.return();
+            void stream.return();
           },
           { once: true },
         );
-        return events;
+        return stream;
       },
     },
   };
@@ -113,7 +131,13 @@ export const legacyFixture = (options: object = {}) => {
     backend,
     logger,
     unavailable,
-    events,
+    get events() {
+      return current();
+    },
+    streams,
+    offline: (value = true) => {
+      transport.offline = value;
+    },
     list,
     fork,
     contextMessages: context,

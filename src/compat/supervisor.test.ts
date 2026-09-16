@@ -1,57 +1,16 @@
-import { ChildProcess } from "node:child_process";
-import { PassThrough } from "node:stream";
-import type { Endpoint } from "@opencode/client/service";
 import { afterEach, expect, it, vi } from "vitest";
+import {
+  supervisorFixture as fixture,
+  ownershipRecord as record,
+} from "../../test/supervisor-fixture.js";
 import { parseOptions } from "../config.js";
-import { acquireCompatibility, Supervisor } from "./supervisor.js";
+import { Supervisor } from "./supervisor.js";
 
 afterEach(() => {
   vi.restoreAllMocks();
   vi.useRealTimers();
   vi.unstubAllEnvs();
 });
-const fixture = (options: object = {}) => {
-  const child = new ChildProcess();
-  Object.defineProperty(child, "pid", { value: 12345, configurable: true });
-  child.stderr = new PassThrough();
-  const discover = vi.fn<() => Promise<Endpoint | undefined>>(async () => ({
-    url: "http://host",
-    auth: { type: "basic" as const, username: "opencode", password: "secret" },
-  }));
-  const runtime = vi.fn(async () => "/bin/node");
-  const spawn = vi.fn(() => child);
-  const kill = vi.fn((_pid: number, _signal: NodeJS.Signals) => {
-    Object.defineProperty(child, "exitCode", { value: 0, configurable: true });
-    child.emit("exit", 0, null);
-  });
-  const health = vi.fn(async () => true);
-  const report = vi.fn();
-  const config = parseOptions({
-    bind: "127.0.0.1",
-    healthCheck: { intervalMs: 10 },
-    shutdownGraceMs: 10,
-    restart: { baseDelayMs: 10, maxDelayMs: 20, maxRetries: 2, windowMs: 100 },
-    ...options,
-  });
-  const supervisor = new Supervisor(config, "127.0.0.1", report, {
-    discover,
-    runtime,
-    spawn,
-    kill,
-    health,
-  });
-  return {
-    child,
-    discover,
-    runtime,
-    spawn,
-    kill,
-    health,
-    report,
-    supervisor,
-    config,
-  };
-};
 
 it("forwards resolved service auth and legacy config and cleans up its child", async () => {
   const f = fixture();
@@ -66,6 +25,7 @@ it("forwards resolved service auth and legacy config and cleans up its child", a
         auth: { type: "basic", username: "opencode", password: "secret" },
       }),
       OPENCODE_RUN_SERVER_PARENT_PID: String(process.pid),
+      OPENCODE_RUN_SERVER_FINGERPRINT: f.supervisor.print,
     }),
   );
   f.child.stderr?.emit("data", Buffer.from("diagnostic"));
@@ -87,7 +47,7 @@ it("waits for managed-service discovery without starting a different server", as
   await f.supervisor.dispose();
 });
 
-it("bounds restart backoff and ignores duplicate error/exit notifications", async () => {
+it("bounds restart backoff, pauses a spent budget, and ignores duplicate exits", async () => {
   vi.useFakeTimers();
   const f = fixture();
   f.supervisor.start();
@@ -102,25 +62,101 @@ it("bounds restart backoff and ignores duplicate error/exit notifications", asyn
   f.child.emit("exit", 1, null);
   await vi.advanceTimersByTimeAsync(50);
   expect(f.spawn).toHaveBeenCalledTimes(3);
+  expect(f.report).toHaveBeenCalledWith(
+    "compatibility listener restart budget spent; pausing",
+  );
+  await vi.advanceTimersByTimeAsync(60);
+  expect(f.spawn).toHaveBeenCalledTimes(4);
   await f.supervisor.dispose();
 });
 
-it("does not restart an occupied port or a dead backend", async () => {
+it("keeps re-checking after port contention and an unreachable backend", async () => {
   vi.useFakeTimers();
   const f = fixture();
   f.supervisor.start();
   await vi.advanceTimersByTimeAsync(0);
   f.child.emit("exit", 3, null);
-  await vi.advanceTimersByTimeAsync(30);
+  await vi.advanceTimersByTimeAsync(0);
   expect(f.health).not.toHaveBeenCalled();
-  expect(f.spawn).toHaveBeenCalledOnce();
+  await vi.advanceTimersByTimeAsync(11);
+  expect(f.spawn).toHaveBeenCalledTimes(2);
+  f.health.mockResolvedValue("down");
+  f.child.emit("exit", 1, null);
+  await vi.advanceTimersByTimeAsync(11);
+  expect(f.spawn).toHaveBeenCalledTimes(3);
+  await f.supervisor.dispose();
+});
+
+it("adopts a listener this process already owns and relaunches when it stops", async () => {
+  vi.useFakeTimers();
+  const f = fixture();
+  f.owner.mockImplementation(async () =>
+    record({ fingerprint: f.supervisor.print }),
+  );
   f.supervisor.start();
   await vi.advanceTimersByTimeAsync(0);
-  f.health.mockResolvedValue(false);
-  f.child.emit("exit", 1, null);
-  await vi.advanceTimersByTimeAsync(30);
-  expect(f.spawn).toHaveBeenCalledTimes(2);
+  expect(f.spawn).not.toHaveBeenCalled();
+  expect(f.report).toHaveBeenCalledWith(
+    "compatibility listener already running; adopted",
+  );
+  await vi.advanceTimersByTimeAsync(11);
+  expect(f.report).toHaveBeenCalledTimes(1);
+  f.running.mockReturnValue(false);
+  await vi.advanceTimersByTimeAsync(11);
+  expect(f.spawn).toHaveBeenCalledOnce();
   await f.supervisor.dispose();
+});
+
+it("discards a registration whose address stopped answering", async () => {
+  vi.useFakeTimers();
+  const f = fixture();
+  f.owner.mockResolvedValue(record({ fingerprint: f.supervisor.print }));
+  f.listening.mockResolvedValue(false);
+  f.supervisor.start();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(f.forget).toHaveBeenCalledWith(f.supervisor.file, 4321);
+  expect(f.kill).not.toHaveBeenCalled();
+  expect(f.spawn).toHaveBeenCalledOnce();
+  await f.supervisor.dispose();
+});
+
+it("reclaims a stale listener, escalates, and skips a foreign owner", async () => {
+  vi.useFakeTimers();
+  const f = fixture();
+  f.owner.mockResolvedValue(record({ parentPid: 999_999 }));
+  f.running.mockImplementation((pid) => pid !== 999_999);
+  f.supervisor.start();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(f.kill).toHaveBeenCalledWith(4321, "SIGTERM");
+  await vi.advanceTimersByTimeAsync(11);
+  expect(f.kill).toHaveBeenCalledWith(4321, "SIGKILL");
+  expect(f.spawn).not.toHaveBeenCalled();
+  f.running.mockReturnValue(true);
+  await vi.advanceTimersByTimeAsync(11);
+  expect(f.report).toHaveBeenCalledWith(
+    "compatibility listener port owned elsewhere; skipping",
+  );
+  expect(f.spawn).not.toHaveBeenCalled();
+  f.owner.mockResolvedValue(undefined);
+  await vi.advanceTimersByTimeAsync(11);
+  expect(f.spawn).toHaveBeenCalledOnce();
+  await f.supervisor.dispose();
+});
+
+it("terminates its child when the host process exits", async () => {
+  vi.useFakeTimers();
+  const before = process.listenerCount("exit");
+  const f = fixture();
+  f.supervisor.start();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(process.listenerCount("exit")).toBe(before + 1);
+  const hook = process.listeners("exit").at(-1);
+  hook?.(0);
+  hook?.(0);
+  expect(f.kill).toHaveBeenCalledOnce();
+  expect(f.kill).toHaveBeenCalledWith(12345, "SIGTERM");
+  await f.supervisor.dispose();
+  expect(process.listenerCount("exit")).toBe(before);
 });
 
 it("cancels pending restart timers and late startup on unload", async () => {
@@ -163,31 +199,6 @@ it("escalates termination and handles children without a pid", async () => {
   expect(g.kill).not.toHaveBeenCalled();
 });
 
-it("shares a listener between location instances and releases the final reference", async () => {
-  const start = vi
-    .spyOn(Supervisor.prototype, "start")
-    .mockImplementation(() => {});
-  const dispose = vi.spyOn(Supervisor.prototype, "dispose").mockResolvedValue();
-  const config = parseOptions({ bind: "127.0.0.1", port: 50001 });
-  const one = await acquireCompatibility(config, vi.fn());
-  const two = await acquireCompatibility(config, vi.fn());
-  expect(start).toHaveBeenCalledOnce();
-  await one();
-  await one();
-  expect(dispose).not.toHaveBeenCalled();
-  await two();
-  expect(dispose).toHaveBeenCalledOnce();
-});
-
-it("supports default discovery and binding without registering another service", async () => {
-  vi.stubEnv("XDG_STATE_HOME", "/nonexistent-opencode-test-state");
-  const release = await acquireCompatibility(
-    parseOptions({ port: 50002 }),
-    vi.fn(),
-  );
-  await release();
-});
-
 it("uses the real default runtime and spawn path and observes failed companion startup", async () => {
   // The companion rejects port zero before binding any socket.
   const report = vi.fn();
@@ -197,7 +208,9 @@ it("uses the real default runtime and spawn path and observes failed companion s
     report,
     {
       discover: async () => ({ url: "http://127.0.0.1:1" }),
-      health: async () => false,
+      health: async () => "down",
+      owner: async () => undefined,
+      listening: async () => false,
     },
   );
   supervisor.start();
@@ -215,11 +228,8 @@ it("uses process-group termination and tolerates an already-exited group", async
   const kill = vi.spyOn(process, "kill").mockImplementation(() => {
     throw Object.assign(new Error("gone"), { code: "ESRCH" });
   });
-  const supervisor = new Supervisor(f.config, "127.0.0.1", f.report, {
-    discover: f.discover,
-    runtime: f.runtime,
-    spawn: f.spawn,
-  });
+  const { kill: _kill, ...deps } = f.deps;
+  const supervisor = new Supervisor(f.config, "127.0.0.1", f.report, deps);
   supervisor.start();
   await vi.advanceTimersByTimeAsync(0);
   const stopped = supervisor.dispose();
@@ -227,6 +237,19 @@ it("uses process-group termination and tolerates an already-exited group", async
   await stopped;
   expect(kill).toHaveBeenCalledWith(-12345, "SIGTERM");
   expect(kill).toHaveBeenCalledWith(-12345, "SIGKILL");
+});
+
+it("surfaces unexpected termination failures", async () => {
+  vi.useFakeTimers();
+  const f = fixture();
+  vi.spyOn(process, "kill").mockImplementation(() => {
+    throw Object.assign(new Error("denied"), { code: "EPERM" });
+  });
+  const { kill: _kill, ...deps } = f.deps;
+  const supervisor = new Supervisor(f.config, "127.0.0.1", f.report, deps);
+  supervisor.start();
+  await vi.advanceTimersByTimeAsync(0);
+  await expect(supervisor.dispose()).rejects.toThrow("denied");
 });
 
 it("reports health-check errors and does not kill an already-signalled child", async () => {

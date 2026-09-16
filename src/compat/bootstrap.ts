@@ -9,6 +9,12 @@ import { RunQueue } from "../queue.js";
 import { createLegacyApp } from "./app.js";
 import { LegacyBackend } from "./backend.js";
 import { checkHealth, HealthMonitor } from "./health.js";
+import {
+  clearOwnership,
+  ownershipFile,
+  running,
+  writeOwnership,
+} from "./ownership.js";
 
 const endpointSchema = z.object({
   url: z.url(),
@@ -60,24 +66,24 @@ export const bootstrap = async (env: NodeJS.ProcessEnv) => {
   const backend = new LegacyBackend(client, config, logger, () => {
     void shutdown();
   });
+  const bind = config.bind ?? "127.0.0.1";
+  const ownership = ownershipFile(bind, config.port);
   const monitor = new HealthMonitor(
     endpoint.url,
     config.healthCheck,
     () => {
       void shutdown();
     },
-    async (url, timeout) => {
-      try {
-        process.kill(pid, 0);
-      } catch {
-        return false;
-      }
-      return checkHealth(url, timeout);
+    // Only the owning process disappearing is fatal; a busy or briefly
+    // unreachable backend must not stop serving accepted runs.
+    async (url, timeout) => (running(pid) ? checkHealth(url, timeout) : "gone"),
+    (message) => {
+      void logger.info(message, { url: endpoint.url }).catch(console.error);
     },
   );
   const app = createLegacyApp({
     config,
-    bind: config.bind ?? "127.0.0.1",
+    bind,
     mainServerUrl: endpoint.url,
     version: pkg.version,
     health: monitor.snapshot,
@@ -87,7 +93,7 @@ export const bootstrap = async (env: NodeJS.ProcessEnv) => {
   });
   const server = serve({
     fetch: app.fetch,
-    hostname: config.bind ?? "127.0.0.1",
+    hostname: bind,
     port: config.port,
   });
   const shutdown = () => {
@@ -100,6 +106,7 @@ export const bootstrap = async (env: NodeJS.ProcessEnv) => {
       if ("closeIdleConnections" in server) server.closeIdleConnections();
       await backend.dispose();
       clearTimeout(force);
+      await clearOwnership(ownership, process.pid).catch(() => {});
       process.off("SIGTERM", onSignal);
       process.off("SIGINT", onSignal);
     })();
@@ -117,6 +124,14 @@ export const bootstrap = async (env: NodeJS.ProcessEnv) => {
     });
     await backend.connect();
     monitor.start();
+    await writeOwnership(ownership, {
+      pid: process.pid,
+      parentPid: pid,
+      bind,
+      port: config.port,
+      fingerprint: env.OPENCODE_RUN_SERVER_FINGERPRINT ?? "unknown",
+      startedAt: Date.now(),
+    });
   } catch (error) {
     await shutdown();
     if (
