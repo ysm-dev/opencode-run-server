@@ -20,7 +20,7 @@ export const verify = async (root: string, installed: string) => {
   };
   try {
     const status = await rpc.status(undefined, options);
-    assert.equal(status.version, "0.3.0");
+    assert.equal(status.version, "0.3.1");
     assert.equal(status.location.directory, directory);
     const plugins = await f.host.plugin.list(options);
     assert.ok(

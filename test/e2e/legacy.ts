@@ -71,7 +71,7 @@ export const verifyLegacy = async (
     );
     assert.equal((await status()).opencodePath, "/legacy/opencode");
     assert.equal((await status()).mainServer.url, f.url);
-    assert.equal((await status()).version, "0.3.0");
+    assert.equal((await status()).version, "0.3.1");
     await verifySessions(f, post, idle);
 
     f.block();
