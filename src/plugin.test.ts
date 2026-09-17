@@ -30,7 +30,7 @@ it("exposes a v2 definition and location-scoped RPC with queue backpressure", as
     data: { retryAfterSeconds: 1 },
   });
   expect(await f.status()).toMatchObject({
-    version: "0.3.1",
+    version: "0.3.2",
     location: { directory: "/project" },
     runs: { active: 1, queued: 1, total: 2 },
   });

@@ -20,9 +20,10 @@ export const checkHealth = async (
   fetcher: typeof fetch = fetch,
 ): Promise<HealthStatus> => {
   try {
-    // v2.0.4 replaced /api/health with /api/status; only transport reachability
-    // matters here, so the response body and status code are not inspected.
-    await fetcher(new URL("/api/status", url), {
+    // v2.0.6 replaced /api/status with /api/info (v2.0.4 replaced /api/health
+    // with /api/status); only transport reachability matters here, so the
+    // response body and status code are not inspected.
+    await fetcher(new URL("/api/info", url), {
       signal: AbortSignal.timeout(timeoutMs),
     });
     return "ok";

@@ -168,8 +168,7 @@ export const createLegacyHost = async (
     port: 0,
     fetch: async (request) => {
       // Stalls only transport probes, leaving run traffic answerable.
-      if (new URL(request.url).pathname === "/api/status")
-        await health?.promise;
+      if (new URL(request.url).pathname === "/api/info") await health?.promise;
       return z.instanceof(Response).parse(await handler(request));
     },
   });
